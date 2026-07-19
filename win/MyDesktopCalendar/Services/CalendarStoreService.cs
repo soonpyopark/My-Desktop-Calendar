@@ -2003,8 +2003,6 @@ internal sealed class CalendarStoreService
         merged["launchMode"] = NormalizeWidgetLaunchMode(inputWidget);
         var launchMode = GetString(merged, "launchMode", "window");
         merged["enabled"] = launchMode == "desktop";
-        merged["embedStrategy"] = NormalizeEmbedStrategy(
-            GetStringOrNull(inputWidget, "embedStrategy") ?? GetStringOrNull(merged, "embedStrategy"));
         merged["opacity"] = Math.Clamp(GetDouble(merged, "opacity", AppConstants.DefaultOpacity), AppConstants.MinOpacity, 1.0);
         merged["chromeTopInset"] = ClampInt(GetDouble(inputWidget, "chromeTopInset", 0), 0, 200);
         merged["chromeLeftInset"] = ClampInt(GetDouble(inputWidget, "chromeLeftInset", 0), 0, 80);
@@ -2021,14 +2019,6 @@ internal sealed class CalendarStoreService
         if (launchMode == "desktop") return "desktop";
         if (launchMode == "window") return "window";
         return GetBool(widget, "enabled", false) ? "desktop" : "window";
-    }
-
-    private static readonly string[] EmbedStrategyOptions = ["auto", "raised", "workerw", "progman", "zorder"];
-
-    private static string NormalizeEmbedStrategy(string? value)
-    {
-        var key = (value ?? "").Trim().ToLowerInvariant();
-        return Array.IndexOf(EmbedStrategyOptions, key) >= 0 ? key : "auto";
     }
 
     private static JsonObject NormalizeCalendarCustomFlag(JsonObject calendar)
@@ -2278,7 +2268,6 @@ internal sealed class CalendarStoreService
                 ["chromeLeftInset"] = 0,
                 ["chromeRightInset"] = 0,
                 ["chromeBottomInset"] = 0,
-                ["embedStrategy"] = "auto",
                 ["bounds"] = new JsonObject { ["x"] = 400, ["y"] = 60, ["width"] = 1480, ["height"] = 950 },
                 ["margins"] = new JsonObject { ["left"] = 0.2, ["top"] = 0.05, ["right"] = 0.05, ["bottom"] = 0.05 },
             },

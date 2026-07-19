@@ -10,15 +10,6 @@ namespace MyDesktopCalendar.Services;
 /// </summary>
 internal sealed class DesktopEmbedService
 {
-    public enum EmbedStrategy
-    {
-        Auto,
-        Raised,
-        WorkerW,
-        Progman,
-        ZOrder,
-    }
-
     public sealed record Bounds(int X, int Y, int Width, int Height);
 
     public sealed record EmbedInfo(
@@ -32,7 +23,6 @@ internal sealed class DesktopEmbedService
     private readonly object _gate = new();
     private IntPtr _hwnd;
     private Window? _hostWindow;
-    private EmbedStrategy _preferred = EmbedStrategy.Auto;
     private EmbedInfo _last = new(false, null, "auto", "none", [], DateTime.UtcNow.ToString("o"));
     private Bounds? _lockedBounds;
     /// <summary>
@@ -46,7 +36,6 @@ internal sealed class DesktopEmbedService
     private System.Windows.Threading.DispatcherTimer? _maintenance;
     private System.Windows.Threading.DispatcherTimer? _recompositeHeartbeat;
     private IntPtr _embedParent;
-    private bool _interactiveAboveIcons;
     /// <summary>
     /// True when the *current* embed connection is the SysListView32/WS_POPUP path
     /// (<see cref="EmbedSysListView32"/>) rather than one of the existing WS_CHILD
@@ -74,12 +63,6 @@ internal sealed class DesktopEmbedService
     /// the same click ends up double-firing.
     /// </summary>
     public bool IsPopupStyleEmbed => _popupStyleEmbed;
-
-    /// <summary>
-    /// Host temporarily above SHELLDLL_DefView so in-surface overlays (settings)
-    /// receive clicks without App unlock (avoids wallpaper flash around the calendar).
-    /// </summary>
-    public bool InteractiveOverlayActive => _interactiveAboveIcons;
 
     public EmbedInfo LastInfo => _last;
     public Bounds? LockedBounds => _lockedBounds;
@@ -118,13 +101,6 @@ internal sealed class DesktopEmbedService
     {
         ApplyAlphaTree();
     }
-
-    public void SetPreferredStrategy(string? strategy)
-    {
-        _preferred = ParseStrategy(strategy);
-    }
-
-    public EmbedStrategy PreferredStrategy => _preferred;
 
     public void SetOpacity(double opacity)
     {
@@ -261,18 +237,13 @@ internal sealed class DesktopEmbedService
         }
     }
 
-    public EmbedInfo Embed(Bounds? bounds = null, string? strategy = null)
+    public EmbedInfo Embed(Bounds? bounds = null)
     {
         lock (_gate)
         {
             if (_hwnd == IntPtr.Zero || !Win32.IsWindow(_hwnd))
             {
                 throw new InvalidOperationException("Window handle is not ready.");
-            }
-
-            if (!string.IsNullOrWhiteSpace(strategy))
-            {
-                _preferred = ParseStrategy(strategy);
             }
 
             var targetBounds = Normalize(bounds ?? _lockedBounds ?? GetCurrentBounds());
@@ -282,11 +253,11 @@ internal sealed class DesktopEmbedService
             if (IsShellParented && _embedParent != IntPtr.Zero && IsParentedTo(_hwnd, _embedParent))
             {
                 ShowSurfaceUnlocked(targetBounds);
-                var active = _last.ActiveMode ?? "raised";
+                var active = _last.ActiveMode ?? "auto";
                 _last = new EmbedInfo(
                     true,
                     active,
-                    _preferred.ToString().ToLowerInvariant(),
+                    "auto",
                     _last.Technique == "none" ? "parent" : _last.Technique,
                     _last.Attempts,
                     DateTime.UtcNow.ToString("o"));
@@ -301,7 +272,7 @@ internal sealed class DesktopEmbedService
                 _popupStyleEmbed = false;
 
                 var attempts = new List<object>();
-                foreach (var mode in ResolveAttemptOrder(_preferred))
+                foreach (var mode in ResolveAttemptOrder())
                 {
                     try
                     {
@@ -309,7 +280,7 @@ internal sealed class DesktopEmbedService
                         {
                             SnapMoveAndSize(
                                 targetBounds,
-                                parentRelative: !_popupStyleEmbed && mode is "raised" or "workerw" or "progman" or "auto");
+                                parentRelative: !_popupStyleEmbed && mode == "auto");
                             attempts.Add(new
                             {
                                 mode,
@@ -322,14 +293,11 @@ internal sealed class DesktopEmbedService
                             Win32.ShowWindow(_hwnd, Win32.SW_SHOW);
                             ForceRecomposite(_hwnd);
                             ScheduleRecompositeRetries(_hwnd);
-                            var activeMode = mode == "auto"
-                                ? (IsModernDesktopComposition(FindProgman()) ? "raised" : "workerw")
-                                : mode;
                             _last = new EmbedInfo(
                                 true,
-                                activeMode,
-                                _preferred.ToString().ToLowerInvariant(),
-                                activeMode == "zorder" ? "zorder" : "parent",
+                                mode,
+                                "auto",
+                                "parent",
                                 attempts,
                                 DateTime.UtcNow.ToString("o"));
                             StartMaintenance(targetBounds);
@@ -351,7 +319,7 @@ internal sealed class DesktopEmbedService
                     }
                 }
 
-                _last = new EmbedInfo(false, null, _preferred.ToString().ToLowerInvariant(), "none", attempts, DateTime.UtcNow.ToString("o"));
+                _last = new EmbedInfo(false, null, "auto", "none", attempts, DateTime.UtcNow.ToString("o"));
                 var caps = DetectCapabilities();
                 throw new InvalidOperationException(
                     $"Desktop embed failed. Caps={caps}. Attempts: {string.Join("; ", attempts)}");
@@ -378,47 +346,11 @@ internal sealed class DesktopEmbedService
         }
     }
 
-    /// <summary>
-    /// Raise DesktopHost above DefView so WebView overlays get real clicks.
-    /// Does not Show/Hide App — no wallpaper peek around the calendar.
-    /// </summary>
-    public void SetInteractiveOverlay(bool active)
-    {
-        lock (_gate)
-        {
-            // No-op when unchanged — ApplyRaisedZOrder touches DefView and flashes the desktop.
-            if (_interactiveAboveIcons == active)
-            {
-                return;
-            }
-
-            _interactiveAboveIcons = active;
-            if (!IsShellParented || !IsSurfaceVisible || _hwnd == IntPtr.Zero || !Win32.IsWindow(_hwnd))
-            {
-                return;
-            }
-
-            ResolveShellPeers(out var defView, out var workerW);
-            if (active)
-            {
-                if (NeedsInteractiveZOrder(_hwnd, defView, workerW))
-                {
-                    ApplyInteractiveZOrder(_hwnd, defView, workerW);
-                }
-            }
-            else if (NeedsRaisedZOrder(_hwnd, defView, workerW))
-            {
-                ApplyRaisedZOrder(_hwnd, defView, workerW);
-            }
-        }
-    }
-
     /// <summary>Hide host; keep shell parent (no SetParent(null)).</summary>
     public void HideSurface()
     {
         lock (_gate)
         {
-            _interactiveAboveIcons = false;
             StopMaintenance();
             if (_hwnd != IntPtr.Zero && Win32.IsWindow(_hwnd))
             {
@@ -434,7 +366,7 @@ internal sealed class DesktopEmbedService
             _last = new EmbedInfo(
                 false,
                 null,
-                _preferred.ToString().ToLowerInvariant(),
+                "auto",
                 IsShellParented ? "hidden-parented" : "none",
                 [],
                 DateTime.UtcNow.ToString("o"));
@@ -461,21 +393,6 @@ internal sealed class DesktopEmbedService
         if (_lastAppliedBounds != targetBounds)
         {
             SnapMoveAndSize(targetBounds, parentRelative: !_popupStyleEmbed && IsShellParented && _embedParent != IntPtr.Zero);
-        }
-
-        if (!_popupStyleEmbed && IsShellParented && _embedParent != IntPtr.Zero)
-        {
-            if (IsModernDesktopComposition(_embedParent) || _embedParent == FindProgman())
-            {
-                var defView = FindDefViewUnder(_embedParent);
-                var workerW = FindWorkerWChild(_embedParent);
-                // Only touch DefView/WorkerW z-order (which flashes the desktop, see
-                // SetInteractiveOverlay comment) when it is actually out of place.
-                if (NeedsRaisedZOrder(_hwnd, defView, workerW))
-                {
-                    ApplyRaisedZOrder(_hwnd, defView, workerW);
-                }
-            }
         }
 
         IsSurfaceVisible = true;
@@ -574,7 +491,7 @@ internal sealed class DesktopEmbedService
             ["embedded"] = IsEmbedded,
             ["shellParented"] = IsShellParented,
             ["surfaceVisible"] = IsSurfaceVisible,
-            ["preferredStrategy"] = _preferred.ToString().ToLowerInvariant(),
+            ["preferredStrategy"] = "auto",
             ["popupStyleEmbed"] = _popupStyleEmbed,
             ["opacity"] = GetOpacity(),
             ["lockedBounds"] = _lockedBounds is null
@@ -636,10 +553,6 @@ internal sealed class DesktopEmbedService
         return mode switch
         {
             "syslistview32" => EmbedSysListView32(bounds),
-            "raised" => EmbedModernRaised(bounds),
-            "workerw" => EmbedClassicWorkerW(bounds),
-            "progman" => EmbedToShellParent(FindProgman(), bounds, raisedZOrder: true),
-            "zorder" => EmbedZOrder(bounds),
             "auto" => EmbedAuto(bounds),
             _ => false,
         };
@@ -734,13 +647,13 @@ internal sealed class DesktopEmbedService
         }
 
         var classicWorker = FindClassicSiblingWorkerW();
-        if (classicWorker != IntPtr.Zero && EmbedToShellParent(classicWorker, bounds, raisedZOrder: false))
+        if (classicWorker != IntPtr.Zero && EmbedToShellParent(classicWorker, bounds))
         {
             return true;
         }
 
         var childWorker = FindWorkerWChild(progman);
-        if (childWorker != IntPtr.Zero && EmbedToShellParent(childWorker, bounds, raisedZOrder: false))
+        if (childWorker != IntPtr.Zero && EmbedToShellParent(childWorker, bounds))
         {
             return true;
         }
@@ -757,35 +670,16 @@ internal sealed class DesktopEmbedService
         }
 
         SpawnWorkerW(progman);
-        return EmbedToShellParent(progman, screenBounds, raisedZOrder: true);
+        return EmbedToShellParent(progman, screenBounds);
     }
 
-    private bool EmbedClassicWorkerW(Bounds screenBounds)
-    {
-        var progman = FindProgman();
-        SpawnWorkerW(progman);
-
-        // Modern shells: WorkerW is under Progman — raised Progman parenting is required.
-        if (IsModernDesktopComposition(progman))
-        {
-            return EmbedModernRaised(screenBounds);
-        }
-
-        var worker = FindClassicSiblingWorkerW();
-        if (worker == IntPtr.Zero)
-        {
-            worker = FindWorkerWChild(progman);
-        }
-
-        if (worker == IntPtr.Zero)
-        {
-            return EmbedModernRaised(screenBounds);
-        }
-
-        return EmbedToShellParent(worker, screenBounds, raisedZOrder: false);
-    }
-
-    private bool EmbedToShellParent(IntPtr parent, Bounds screenBounds, bool raisedZOrder)
+    /// <summary>
+    /// WS_CHILD fallback used only when the SysListView32 path (<see cref="EmbedSysListView32"/>)
+    /// can't be found/verified. No Z-order enforcement — the abandoned "calendar behind icons"
+    /// goal used to fight the shell's Z-order here; this just leaves whatever stacking SetParent
+    /// itself produces.
+    /// </summary>
+    private bool EmbedToShellParent(IntPtr parent, Bounds screenBounds)
     {
         if (parent == IntPtr.Zero || _hwnd == IntPtr.Zero)
         {
@@ -808,35 +702,7 @@ internal sealed class DesktopEmbedService
             local.Y,
             screenBounds.Width,
             screenBounds.Height,
-            Win32.SWP_NOACTIVATE | Win32.SWP_FRAMECHANGED | Win32.SWP_NOREDRAW);
-
-        if (raisedZOrder)
-        {
-            var defView = FindDefViewUnder(parent);
-            if (defView == IntPtr.Zero)
-            {
-                defView = FindDesktopDefView();
-            }
-
-            var workerW = FindWorkerWChild(parent);
-            if (workerW == IntPtr.Zero)
-            {
-                workerW = FindClassicSiblingWorkerW();
-            }
-
-            ApplyRaisedZOrder(_hwnd, defView, workerW);
-        }
-        else
-        {
-            Win32.SetWindowPos(
-                _hwnd,
-                Win32.HWND_BOTTOM,
-                0,
-                0,
-                0,
-                0,
-                Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE);
-        }
+            Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE | Win32.SWP_FRAMECHANGED | Win32.SWP_NOREDRAW);
 
         ApplyAlphaTree();
         TryRefreshShellDesktopComposition(parent);
@@ -880,196 +746,6 @@ internal sealed class DesktopEmbedService
         }
     }
 
-    private bool EmbedZOrder(Bounds screenBounds)
-    {
-        // On Win11 24H2+, bare z-order without parenting does not stick under DefView.
-        if (IsModernDesktopComposition(FindProgman()))
-        {
-            return false;
-        }
-
-        // Dual-HWND rule: never detach a shell-parented DesktopHost.
-        if (IsShellParented)
-        {
-            return false;
-        }
-
-        var defView = FindDesktopDefView();
-        Win32.SetWindowPos(
-            _hwnd,
-            defView != IntPtr.Zero ? defView : Win32.HWND_BOTTOM,
-            screenBounds.X,
-            screenBounds.Y,
-            screenBounds.Width,
-            screenBounds.Height,
-            Win32.SWP_NOACTIVATE);
-
-        _embedParent = IntPtr.Zero;
-        return true;
-    }
-
-    private void ResolveShellPeers(out IntPtr defView, out IntPtr workerW)
-    {
-        defView = IntPtr.Zero;
-        workerW = IntPtr.Zero;
-        if (_embedParent != IntPtr.Zero)
-        {
-            defView = FindDefViewUnder(_embedParent);
-            workerW = FindWorkerWChild(_embedParent);
-        }
-
-        if (defView == IntPtr.Zero)
-        {
-            defView = FindDesktopDefView();
-        }
-    }
-
-    /// <summary>
-    /// True when <paramref name="hwnd"/> is not already sitting immediately below
-    /// <paramref name="defView"/> (and above <paramref name="workerW"/>) in the shell's sibling
-    /// z-order. Lets callers skip <see cref="ApplyRaisedZOrder"/> — which reorders Explorer's own
-    /// SHELLDLL_DefView and can visibly flash desktop icons — when the order is already correct
-    /// (the common case on settings/quick-edit resume, where nothing actually moved while hidden).
-    /// </summary>
-    private static bool NeedsRaisedZOrder(IntPtr hwnd, IntPtr defView, IntPtr workerW)
-    {
-        if (defView != IntPtr.Zero)
-        {
-            if (Win32.GetWindow(defView, Win32.GW_HWNDNEXT) != hwnd)
-            {
-                return true;
-            }
-        }
-        else if (Win32.GetWindow(hwnd, Win32.GW_HWNDNEXT) != IntPtr.Zero)
-        {
-            return true;
-        }
-
-        if (workerW != IntPtr.Zero && workerW != hwnd
-            && Win32.GetWindow(hwnd, Win32.GW_HWNDNEXT) != workerW)
-        {
-            return true;
-        }
-
-        return false;
-    }
-
-    /// <summary>Same idea as <see cref="NeedsRaisedZOrder"/>, for the interactive-overlay order.</summary>
-    private static bool NeedsInteractiveZOrder(IntPtr hwnd, IntPtr defView, IntPtr workerW)
-    {
-        if (Win32.GetWindow(hwnd, Win32.GW_HWNDPREV) != IntPtr.Zero)
-        {
-            return true;
-        }
-
-        var insertAfter = hwnd;
-        if (defView != IntPtr.Zero)
-        {
-            if (Win32.GetWindow(hwnd, Win32.GW_HWNDNEXT) != defView)
-            {
-                return true;
-            }
-
-            insertAfter = defView;
-        }
-
-        if (workerW != IntPtr.Zero && workerW != hwnd
-            && Win32.GetWindow(insertAfter, Win32.GW_HWNDNEXT) != workerW)
-        {
-            return true;
-        }
-
-        return false;
-    }
-
-    private static void ApplyRaisedZOrder(IntPtr hwnd, IntPtr defView, IntPtr workerW)
-    {
-        if (defView != IntPtr.Zero)
-        {
-            // Keep icons above the calendar.
-            Win32.SetWindowPos(
-                defView,
-                Win32.HWND_TOP,
-                0,
-                0,
-                0,
-                0,
-                Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE);
-
-            // Place our window immediately below DefView.
-            Win32.SetWindowPos(
-                hwnd,
-                defView,
-                0,
-                0,
-                0,
-                0,
-                Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE);
-        }
-        else
-        {
-            Win32.SetWindowPos(
-                hwnd,
-                Win32.HWND_BOTTOM,
-                0,
-                0,
-                0,
-                0,
-                Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE);
-        }
-
-        if (workerW != IntPtr.Zero && workerW != hwnd)
-        {
-            // Wallpaper WorkerW stays under the calendar.
-            Win32.SetWindowPos(
-                workerW,
-                hwnd,
-                0,
-                0,
-                0,
-                0,
-                Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE);
-        }
-    }
-
-    /// <summary>Host above DefView — icons temporarily underneath the calendar overlay.</summary>
-    private static void ApplyInteractiveZOrder(IntPtr hwnd, IntPtr defView, IntPtr workerW)
-    {
-        Win32.SetWindowPos(
-            hwnd,
-            Win32.HWND_TOP,
-            0,
-            0,
-            0,
-            0,
-            Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE);
-
-        if (defView != IntPtr.Zero)
-        {
-            Win32.SetWindowPos(
-                defView,
-                hwnd,
-                0,
-                0,
-                0,
-                0,
-                Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE);
-        }
-
-        if (workerW != IntPtr.Zero && workerW != hwnd)
-        {
-            var insertAfter = defView != IntPtr.Zero ? defView : hwnd;
-            Win32.SetWindowPos(
-                workerW,
-                insertAfter,
-                0,
-                0,
-                0,
-                0,
-                Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE);
-        }
-    }
-
     private void StartMaintenance(Bounds bounds)
     {
         StopMaintenance();
@@ -1108,35 +784,12 @@ internal sealed class DesktopEmbedService
                     }
                 }
 
-                // Shell may reshuffle DefView/WorkerW (theme, wallpaper, Win+D) — but only
-                // re-apply z-order/position when actually out of place, otherwise this 5s
-                // timer would needlessly touch Explorer's DefView (desktop icon flash) forever.
-                // SysListView32/WS_POPUP embeds sit *inside* the ListView, not as a
-                // Progman/WorkerW sibling, so this DefView/WorkerW z-order dance never applies.
-                if (!_popupStyleEmbed && (IsModernDesktopComposition(_embedParent) || _embedParent == FindProgman()))
+                // Keep geometry in sync without touching Z-order — SysListView32/WS_POPUP
+                // embeds always use screen coordinates; the WS_CHILD fallback needs
+                // parent-relative coordinates converted.
+                if (_lastAppliedBounds != bounds)
                 {
-                    var defView = FindDefViewUnder(_embedParent);
-                    var workerW = FindWorkerWChild(_embedParent);
-                    if (_interactiveAboveIcons)
-                    {
-                        if (NeedsInteractiveZOrder(_hwnd, defView, workerW))
-                        {
-                            ApplyInteractiveZOrder(_hwnd, defView, workerW);
-                        }
-                    }
-                    else if (NeedsRaisedZOrder(_hwnd, defView, workerW))
-                    {
-                        ApplyRaisedZOrder(_hwnd, defView, workerW);
-                    }
-
-                    if (_lastAppliedBounds != bounds)
-                    {
-                        SnapMoveOnly(bounds, parentRelative: true);
-                    }
-                }
-                else if (_popupStyleEmbed && _lastAppliedBounds != bounds)
-                {
-                    SnapMoveOnly(bounds, parentRelative: false);
+                    SnapMoveOnly(bounds, parentRelative: !_popupStyleEmbed);
                 }
             }
 
@@ -1467,36 +1120,14 @@ internal sealed class DesktopEmbedService
         return new Bounds(b.X, b.Y, Math.Max(200, b.Width), Math.Max(150, b.Height));
     }
 
-    private static EmbedStrategy ParseStrategy(string? value)
-    {
-        return (value ?? "").Trim().ToLowerInvariant() switch
-        {
-            "raised" => EmbedStrategy.Raised,
-            "workerw" => EmbedStrategy.WorkerW,
-            "progman" => EmbedStrategy.Progman,
-            "zorder" => EmbedStrategy.ZOrder,
-            _ => EmbedStrategy.Auto,
-        };
-    }
-
-    private static IEnumerable<string> ResolveAttemptOrder(EmbedStrategy strategy)
-    {
-        return strategy switch
-        {
-            EmbedStrategy.Raised => ["raised"],
-            EmbedStrategy.WorkerW => ["workerw", "raised"],
-            EmbedStrategy.Progman => ["progman", "raised"],
-            EmbedStrategy.ZOrder => ["zorder", "auto"],
-            // Prefer SysListView32/WS_POPUP first — it parents *inside* the icon ListView itself,
-            // so the calendar draws on top of the desktop icons, and real mouse input reaches
-            // WebView2 natively (no UndockZoneMonitor click-zone polling needed). Falls back to
-            // the WS_CHILD chain (classic WorkerW vs Win11 raised, then explicit fallbacks) when
-            // SysListView32 can't be found/verified — that chain parents as a *sibling* of
-            // SHELLDLL_DefView and z-orders the icons above the calendar instead (calendar sits
-            // behind icons).
-            _ => ["syslistview32", "auto", "raised", "workerw", "progman"],
-        };
-    }
+    /// <summary>
+    /// Fixed attempt order — no user-selectable strategy. Prefer SysListView32/WS_POPUP
+    /// first: it parents *inside* the icon ListView itself, so real mouse input reaches
+    /// WebView2 natively (no <see cref="UndockZoneMonitor"/> click-zone polling needed).
+    /// Falls back to the single WS_CHILD chain (<see cref="EmbedAuto"/>, itself cross-version
+    /// aware) when SysListView32 can't be found/verified.
+    /// </summary>
+    private static IEnumerable<string> ResolveAttemptOrder() => ["syslistview32", "auto"];
 
     private static IntPtr FindProgman()
     {

@@ -4,7 +4,7 @@ export const DEFAULT_PORT = 3010;
 import { CALENDAR_COLOR_PALETTE } from './calendarColorPalette.js';
 
 /** Application display version. */
-export const APP_VERSION = '1.1.6';
+export const APP_VERSION = '1.1.7';
 
 /** Application display name. */
 export const APP_NAME = 'My Desktop Calendar';
@@ -142,32 +142,6 @@ export const WIDGET_LAUNCH_MODE = {
   DESKTOP: 'desktop',
 };
 
-/** Desktop shell embed strategy (Win10/11 variants differ). */
-export const EMBED_STRATEGY = {
-  AUTO: 'auto',
-  RAISED: 'raised',
-  WORKERW: 'workerw',
-  PROGMAN: 'progman',
-  ZORDER: 'zorder',
-};
-
-/** @type {readonly string[]} */
-export const EMBED_STRATEGY_OPTIONS = Object.values(EMBED_STRATEGY);
-
-/**
- * @param {unknown} value
- * @returns {'auto' | 'raised' | 'workerw' | 'progman' | 'zorder'}
- */
-export function normalizeEmbedStrategy(value) {
-  const key = String(value ?? '')
-    .trim()
-    .toLowerCase();
-  if (EMBED_STRATEGY_OPTIONS.includes(key)) {
-    return /** @type {'auto' | 'raised' | 'workerw' | 'progman' | 'zorder'} */ (key);
-  }
-  return EMBED_STRATEGY.AUTO;
-}
-
 export const DEFAULT_WIDGET_SETTINGS = {
   launchMode: WIDGET_LAUNCH_MODE.DESKTOP,
   enabled: true,
@@ -179,8 +153,6 @@ export const DEFAULT_WIDGET_SETTINGS = {
   chromeLeftInset: 0,
   chromeRightInset: 0,
   chromeBottomInset: 0,
-  /** @type {'auto' | 'raised' | 'workerw' | 'progman' | 'zorder'} */
-  embedStrategy: EMBED_STRATEGY.AUTO,
   bounds: { ...DEFAULT_DESKTOP_WIDGET_BOUNDS },
   margins: { ...DEFAULT_DESKTOP_WIDGET_MARGINS },
 };

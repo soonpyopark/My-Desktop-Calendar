@@ -499,6 +499,11 @@ public partial class MainWindow : Window
     private void OnSourceInitialized(object? sender, EventArgs e)
     {
         _hwnd = new WindowInteropHelper(this).Handle;
+        // Cloak before WPF ever gets a chance to actually paint this HWND — the very
+        // first pixels the user sees should be the embedded desktop surface (or a real
+        // window, only if embedding later fails), never a boot-splash/normal-window flash.
+        CloakAppWindowAtBoot(_hwnd);
+        _surfaces.MarkAppCloakedAtBoot();
         ApplyNativeWindowIcons(_hwnd);
         // AppWindow stays top-level forever — never attach DesktopEmbedService to it.
         DisableAppDwmTransitions(_hwnd);
@@ -506,15 +511,18 @@ public partial class MainWindow : Window
         _hwndSource?.AddHook(WndProc);
         _bridge.ApplyFrameThemeFromSettings();
 
-        var settings = _store.ReadStore()["settings"]?.AsObject();
-        var widget = settings?["widget"]?.AsObject();
+        RestoreWindowSession();
+    }
 
-        if (widget?["embedStrategy"]?.GetValue<string>() is { } strategy)
+    private static void CloakAppWindowAtBoot(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero || !Win32.IsWindow(hwnd))
         {
-            _embed.SetPreferredStrategy(strategy);
+            return;
         }
 
-        RestoreWindowSession();
+        var value = 1;
+        _ = Win32.DwmSetWindowAttribute(hwnd, Win32.DWMWA_CLOAK, ref value, sizeof(int));
     }
 
     private static void DisableAppDwmTransitions(IntPtr hwnd)
@@ -558,6 +566,16 @@ public partial class MainWindow : Window
             catch (Exception ex)
             {
                 MessageBox.Show($"바탕화면 임베드 실패: {ex.Message}", AppConstants.AppTitle);
+                try
+                {
+                    // Embedding failed at boot — fall back to a real window instead of
+                    // leaving AppWindow cloaked (invisible) forever.
+                    _surfaces.EnterWindowMode();
+                }
+                catch
+                {
+                    /* best-effort — nothing more we can do here */
+                }
             }
         }, System.Windows.Threading.DispatcherPriority.Background);
     }
@@ -1203,7 +1221,6 @@ public partial class MainWindow : Window
                     {
                         ["launchMode"] = "desktop",
                         ["enabled"] = true,
-                        ["embedStrategy"] = "auto",
                         ["bounds"] = new JsonObject
                         {
                             ["x"] = bounds.X,

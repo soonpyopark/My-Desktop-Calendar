@@ -1311,17 +1311,6 @@ internal sealed class NativeBridge
             return new JsonObject { ["ok"] = true, ["claimed"] = claimed };
         }
 
-        if (path == "/api/desktop/widget/interactive-overlay" && method == "POST")
-        {
-            var active = body["active"]?.GetValue<bool>() ?? false;
-            _window.Dispatcher.Invoke(() => _embed.SetInteractiveOverlay(active));
-            return new JsonObject
-            {
-                ["ok"] = true,
-                ["active"] = _embed.InteractiveOverlayActive,
-            };
-        }
-
         if (path == "/api/desktop/widget/ui-zones" && method == "POST")
         {
             if (body.Count == 0 || (body["clientRects"] is null && body["clientRect"] is null && body["zones"] is null))
@@ -1574,20 +1563,6 @@ internal sealed class NativeBridge
 
     private void ApplyShellSettings(JsonObject settings)
     {
-        try
-        {
-            var widget = settings["widget"] as JsonObject;
-            if (widget?["embedStrategy"] is JsonValue strategyNode
-                && strategyNode.TryGetValue<string>(out var strategy))
-            {
-                _embed.SetPreferredStrategy(strategy);
-            }
-        }
-        catch
-        {
-            /* ignore */
-        }
-
         try
         {
             var viewOptions = settings["viewOptions"] as JsonObject;

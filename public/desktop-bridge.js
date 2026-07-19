@@ -334,18 +334,6 @@
     }
   }
 
-  /** Raise DesktopHost above DefView for in-surface overlays — no App unlock. */
-  async function setDesktopInteractiveOverlay(active) {
-    if (!requireNativeHost()) return null;
-    try {
-      return await api('POST', '/api/desktop/widget/interactive-overlay', {
-        active: Boolean(active),
-      });
-    } catch {
-      return null;
-    }
-  }
-
   async function setUiActionZones(payload) {
     if (!requireNativeHost()) return null;
     try {
@@ -530,7 +518,6 @@
     ackPendingUiAction,
     suspendDesktopEmbedForUi,
     claimBootSuspendForAuth,
-    setDesktopInteractiveOverlay,
     setUiActionZones,
     clearUiActionZones,
     setCreateEventZones,
@@ -579,7 +566,7 @@
       window.open(url, '_blank', 'noopener,noreferrer');
     },
     showAbout: async () => {
-      let appTitle = 'My Desktop Calendar v1.1.6';
+      let appTitle = 'My Desktop Calendar v1.1.7';
       try {
         const data = await api('GET', '/api/health');
         if (data?.name && data?.version) {
@@ -643,7 +630,7 @@
       window.dispatchEvent(new CustomEvent('mycalendar:nativeReady'));
       await window.myCalendarTray?.setupTray?.();
       if (Neutralino.window?.setTitle) {
-        await Neutralino.window.setTitle('My Desktop Calendar v1.1.6');
+        await Neutralino.window.setTitle('My Desktop Calendar v1.1.7');
       }
       if (Neutralino.app?.exitProcessOnClose !== undefined) {
         Neutralino.app.exitProcessOnClose = false;

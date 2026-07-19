@@ -36,6 +36,17 @@ internal sealed class DesktopSurfaceController
         _bridge = bridge;
     }
 
+    /// <summary>
+    /// MainWindow DWM-cloaks its own HWND directly in OnSourceInitialized, before this
+    /// controller ever touches it, to stop the boot-splash/normal-window flash. Call this
+    /// right after so <see cref="_appCloaked"/> matches reality — no <see cref="_app"/>.Show()
+    /// or redundant SetWindowAttribute call here, MainWindow already did the real work.
+    /// </summary>
+    public void MarkAppCloakedAtBoot()
+    {
+        _appCloaked = true;
+    }
+
     public DesktopEmbedService Embed => _embed;
     public DesktopHostWindow? Host => _host;
     public IntPtr HostHwnd => _host?.EnsureHwnd() ?? IntPtr.Zero;
@@ -71,7 +82,11 @@ internal sealed class DesktopSurfaceController
             // uses DWM cloak on AppWindow instead (see EnterWindowMode / SuspendDesktopForUi /
             // ResumeDesktopAfterUi below), because AppWindow is always already fully painted.
             // Skip the cover when staying uncloaked — App is already the visible surface, so
-            // there is nothing to freeze/hide during the SetParent.
+            // there is nothing to freeze/hide during the SetParent. Also skip it when App is
+            // already cloaked (the normal boot path — see MainWindow.OnSourceInitialized's
+            // boot-cloak): nothing is visible to freeze-frame in the first place. Kept as a
+            // fallback for the rare case the boot-cloak didn't happen (e.g. a later, non-boot
+            // first embed).
             //
             // Capture source must be AppWindow, never HostHwnd: at this point Host still sits
             // at its CreateHostAsync placeholder geometry (16x16, off-screen at -32000,-32000) —
@@ -83,7 +98,7 @@ internal sealed class DesktopSurfaceController
             // frozen frame. AppWindow, by contrast, is guaranteed on-screen at `target` right now
             // (target defaults to CaptureAppPhysicalBounds() above) and fully painted, so it's
             // always the correct freeze source for this transition.
-            var covered = cloakApp && DesktopTransitionCover.TryShow(
+            var covered = cloakApp && !_appCloaked && DesktopTransitionCover.TryShow(
                 _app,
                 GetAppHwnd(),
                 target);
