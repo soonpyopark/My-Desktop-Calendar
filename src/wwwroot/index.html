@@ -42,9 +42,54 @@
     app-region: drag;
   }
 
-  #clickButton {
-    /* Stays clickable even inside a draggable frame. */
+  #clickButton, #insertButton, .insert-popup {
+    /* Stays clickable/typeable even inside a draggable frame. */
     app-region: no-drag;
+  }
+
+  .button-row {
+    display: flex;
+    gap: 10px;
+  }
+
+  /*
+    xdiary's own date-cell entry (live-captured: a small xUIWindow pops up right where the
+    cell was clicked, an IME attaches to it while typing, then it hides again once committed)
+    reproduced here as a plain HTML popup instead of a second native window — same shape:
+    opens anchored to the triggering point, takes text input, commits + closes on Enter/blur.
+  */
+  .insert-popup {
+    position: fixed;
+    display: none;
+    background: #1a1a1a;
+    border-radius: 8px;
+    padding: 6px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+    z-index: 10;
+  }
+
+  .insert-popup.visible {
+    display: block;
+  }
+
+  .insert-popup input {
+    font-size: 14px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: none;
+    outline: none;
+    width: 170px;
+    background: #ffffff;
+    color: #1a1a1a;
+  }
+
+  .entries {
+    font-size: 12px;
+    max-width: 320px;
+    max-height: 64px;
+    overflow-y: auto;
+    text-align: center;
+    opacity: 0.9;
   }
 
   .title {
@@ -111,12 +156,24 @@
       it to (SysListView32 or the Progman-raised fallback) — see the diagnostics log for
       which one is active.
     -->
-    <button id="clickButton" type="button">Click me</button>
+    <div class="button-row">
+      <button id="clickButton" type="button">Click me</button>
+      <button id="insertButton" type="button">Insert me</button>
+    </div>
     <div class="counter" id="counter">Clicks: 0</div>
+    <div class="entries" id="entries"></div>
     <div class="hint">
       Watch the clock for gray flashes/freezes. Click the button directly on the desktop —
       if the counter never moves, clicks are still being swallowed by the shell.
     </div>
+  </div>
+
+  <!--
+    Anchored near "Insert me" when opened (see openInsertPopup) — mirrors xdiary's own
+    date-cell editor popping up right at the click point instead of a fixed dialog location.
+  -->
+  <div class="insert-popup" id="insertPopup">
+    <input type="text" id="insertInput" placeholder="Type a value…" />
   </div>
 
   <script>
@@ -141,9 +198,74 @@
       frameEl.classList.add('flash');
     });
 
+    // "Insert me" — value entry modeled on xdiary's own date-cell editor (live-captured: a
+    // small popup opens right at the click point, takes typed/IME text, then commits + closes
+    // on Enter or focus-out). Reproduced here as a plain HTML input instead of a second native
+    // window, but the same open-at-click-point / type / commit-and-close shape.
+    const insertButton = document.getElementById('insertButton');
+    const insertPopup = document.getElementById('insertPopup');
+    const insertInput = document.getElementById('insertInput');
+    const entriesEl = document.getElementById('entries');
+    let entries = [];
+
+    function escapeHtml(s) {
+      return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    function renderEntries() {
+      entriesEl.innerHTML = entries.map((v) => `<div>• ${escapeHtml(v)}</div>`).join('');
+    }
+
+    function openInsertPopup() {
+      const rect = insertButton.getBoundingClientRect();
+      insertPopup.style.left = `${rect.left}px`;
+      insertPopup.style.top = `${rect.bottom + 6}px`;
+      insertPopup.classList.add('visible');
+      insertInput.value = '';
+      insertInput.focus();
+    }
+
+    function closeInsertPopup(commit) {
+      if (!insertPopup.classList.contains('visible')) {
+        // Already closed — avoids double-committing when both the Enter/Escape handler and
+        // the resulting blur event try to close it.
+        return;
+      }
+
+      insertPopup.classList.remove('visible');
+      if (commit) {
+        const value = insertInput.value.trim();
+        if (value) {
+          entries.unshift(value);
+          entries = entries.slice(0, 5);
+          renderEntries();
+        }
+      }
+    }
+
+    insertButton.addEventListener('click', () => {
+      if (insertPopup.classList.contains('visible')) {
+        closeInsertPopup(false);
+      } else {
+        openInsertPopup();
+      }
+    });
+
+    insertInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        closeInsertPopup(true);
+      } else if (e.key === 'Escape') {
+        closeInsertPopup(false);
+      }
+    });
+
+    // Commits on click-away too, same as xdiary's editor closing (and saving) as soon as
+    // focus leaves it, not just on Enter.
+    insertInput.addEventListener('blur', () => closeInsertPopup(true));
+
     // Host (DesktopHostWindow.PrepareForFloating/PrepareForEmbedding) tells us which state
     // we're in via PostWebMessageAsString. Only floating gets the draggable region — an
-    // embedded (WS_CHILD, parented into the desktop) window shouldn't be moved this way.
+    // embedded (SetParent'd into the desktop shell) window shouldn't be moved this way.
     if (window.chrome && window.chrome.webview) {
       window.chrome.webview.addEventListener('message', (event) => {
         if (event.data === 'floating') {

@@ -10,6 +10,15 @@ namespace MyDesktopCalendar.Services;
 /// immediately below DefView in z-order) used by My Desktop Calendar today if
 /// <c>SysListView32</c> can't be found or the attach can't be verified.
 ///
+/// A second live capture of xdiary (watching its window styles/rects while its own
+/// position/size-adjustment buttons were clicked) showed it never switches to
+/// <c>WS_CHILD</c> even while <c>SetParent</c>'d into <c>SysListView32</c> — it stays
+/// <c>WS_POPUP</c> throughout, embedded or not, and just calls plain <c>SetWindowPos</c> with
+/// absolute screen coordinates to move/resize in place. This mirrors that: the host is
+/// <c>WS_POPUP</c> in every state (see <see cref="PrepareEmbeddedStyle"/>), so
+/// <see cref="Reposition"/> can move/resize it live while embedded — no undock round-trip
+/// needed just to change position or size.
+///
 /// Every step is written to <see cref="DiagLog"/> so the outcome is visible without a
 /// debugger attached.
 /// </summary>
@@ -36,10 +45,16 @@ internal sealed class DesktopEmbedService
     }
 
     /// <summary>
-    /// The host's current on-screen bounds (works whether it's currently floating/undocked
-    /// or already embedded — <c>GetWindowRect</c> always returns screen coordinates regardless
-    /// of parent). Used so re-embedding after an unlock+resize lands exactly where the user
-    /// left it instead of snapping back to <see cref="GetDefaultBounds"/>.
+    /// The host's current on-screen bounds, in terms of its <em>content</em> (client) area —
+    /// deliberately <c>GetClientRect</c> + <c>ClientToScreen</c> rather than
+    /// <c>GetWindowRect</c>, so this means the same thing whether the window is currently
+    /// embedded (no border, client == window rect) or floating (has the <c>WS_THICKFRAME</c>
+    /// resize border added by <see cref="RestoreTopLevelStyle"/>, so the window rect is bigger
+    /// than the client rect). Used so re-embedding after an unlock+resize lands exactly where
+    /// the user left it, at the same content size, instead of snapping back to
+    /// <see cref="GetDefaultBounds"/> or shrinking/growing by the border thickness. Also the
+    /// basis <see cref="Reposition"/> nudges from, so the position/size stepper buttons always
+    /// read back the true current content bounds regardless of embed state.
     /// </summary>
     public Bounds? GetCurrentBounds()
     {
@@ -48,8 +63,10 @@ internal sealed class DesktopEmbedService
             return null;
         }
 
-        Win32.GetWindowRect(_hwnd, out var rect);
-        return new Bounds(rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top);
+        Win32.GetClientRect(_hwnd, out var client);
+        var origin = new Win32.POINT { X = 0, Y = 0 };
+        Win32.ClientToScreen(_hwnd, ref origin);
+        return new Bounds(origin.X, origin.Y, client.Right - client.Left, client.Bottom - client.Top);
     }
 
     public static Bounds GetDefaultBounds()
@@ -76,7 +93,7 @@ internal sealed class DesktopEmbedService
             if (IsEmbedded && _embedParent != IntPtr.Zero && IsParentedTo(_hwnd, _embedParent))
             {
                 DiagLog.Write($"Embed: already parented to 0x{_embedParent.ToInt64():X} ({ActiveStrategy}) — show + reposition only");
-                ShowAt(bounds, parentRelative: true);
+                ShowAt(bounds);
                 return true;
             }
 
@@ -129,10 +146,8 @@ internal sealed class DesktopEmbedService
     /// still headless/chromeless (no title bar, no system menu, no min/max box), but with a
     /// native sizing border (<c>WS_THICKFRAME</c>) so the OS itself provides the usual 4-edge +
     /// 4-corner resize hit-testing (HTLEFT/HTRIGHT/HTTOP/HTBOTTOM/HTTOPLEFT/etc. via
-    /// DefWindowProc), no custom hit-testing needed. Mirrors what live inspection showed
-    /// xdiary's "unlocked" state does for its own window (still <c>WS_POPUP</c>, never
-    /// converted to <c>WS_CHILD</c>, so screen coordinates keep working). Returns the
-    /// on-screen bounds the window ends up at, or null if there was nothing to undock.
+    /// DefWindowProc), no custom hit-testing needed. Returns the on-screen bounds the window
+    /// ends up at, or null if there was nothing to undock.
     /// </summary>
     public Bounds? Undock()
     {
@@ -145,43 +160,98 @@ internal sealed class DesktopEmbedService
                 return null;
             }
 
+            // Captured while still embedded (headless, no border), so this is exactly the
+            // content size the user had on the desktop — the size Undock must preserve.
             Win32.GetWindowRect(_hwnd, out var rect);
-            var screenBounds = new Bounds(rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top);
+            var contentBounds = new Bounds(rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top);
 
             Win32.SetParent(_hwnd, IntPtr.Zero);
             RestoreTopLevelStyle(_hwnd);
+
+            // RestoreTopLevelStyle just added WS_THICKFRAME, which (unlike the borderless
+            // embedded state) eats into the window rect to make room for the resize border —
+            // if we positioned the window at contentBounds directly, the visible content would
+            // shrink by the border thickness. Growing the window rect outward (via
+            // AdjustWindowRectExForDpi, so the *content* stays contentBounds and the border is
+            // added on top of that) is what "unlock adds a border without shrinking" means.
+            var windowRect = ContentToWindowRect(_hwnd, contentBounds);
+
             Win32.SetWindowPos(
                 _hwnd,
                 Win32.HWND_TOP,
-                screenBounds.X,
-                screenBounds.Y,
-                screenBounds.Width,
-                screenBounds.Height,
+                windowRect.X,
+                windowRect.Y,
+                windowRect.Width,
+                windowRect.Height,
                 Win32.SWP_FRAMECHANGED | Win32.SWP_SHOWWINDOW);
             Win32.ShowWindow(_hwnd, Win32.SW_SHOW);
             Win32.SetForegroundWindow(_hwnd);
             ForceRecomposite(_hwnd);
 
-            DiagLog.Write($"Undock: SetParent(null) — restored as top-level window at ({screenBounds.X},{screenBounds.Y}) {screenBounds.Width}x{screenBounds.Height}");
+            DiagLog.Write(
+                $"Undock: SetParent(null) — content preserved at {contentBounds.Width}x{contentBounds.Height}, " +
+                $"window grown to ({windowRect.X},{windowRect.Y}) {windowRect.Width}x{windowRect.Height} for the border");
 
             IsEmbedded = false;
             ActiveStrategy = null;
             _embedParent = IntPtr.Zero;
-            return screenBounds;
+            return windowRect;
         }
+    }
+
+    /// <summary>Grows <paramref name="content"/> outward to the window rect needed so that,
+    /// once positioned there, <c>hwnd</c>'s client area ends up exactly matching
+    /// <paramref name="content"/> under its *current* style/DPI (call after any style change,
+    /// e.g. after <see cref="RestoreTopLevelStyle"/>). When the window has no non-client area
+    /// (the normal headless-embedded style from <see cref="PrepareEmbeddedStyle"/> — no
+    /// caption, no thick frame), <c>AdjustWindowRectEx</c> has nothing to add and this is a
+    /// no-op, so <see cref="Reposition"/> can call it unconditionally in either state.</summary>
+    private static Bounds ContentToWindowRect(IntPtr hwnd, Bounds content)
+    {
+        // Style/ex-style are DWORDs with the high bit potentially set (e.g. WS_POPUP =
+        // 0x80000000) — IntPtr.ToInt32() throws OverflowException on those, since it checks
+        // signed Int32 range. unchecked((int)...ToInt64()) just reinterprets the same 32 bits
+        // (same trick PrepareEmbeddedStyle/RestoreTopLevelStyle use via long, just cast one
+        // step further down to the int AdjustWindowRectEx's signature expects).
+        var style = unchecked((int)Win32.GetWindowLongPtrCompat(hwnd, Win32.GWL_STYLE).ToInt64());
+        var exStyle = unchecked((int)Win32.GetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE).ToInt64());
+        var rect = new Win32.RECT
+        {
+            Left = content.X,
+            Top = content.Y,
+            Right = content.X + content.Width,
+            Bottom = content.Y + content.Height,
+        };
+
+        var dpi = Win32.GetDpiForWindow(hwnd);
+        var adjusted = dpi > 0
+            ? Win32.AdjustWindowRectExForDpi(ref rect, style, false, exStyle, dpi)
+            : Win32.AdjustWindowRectEx(ref rect, style, false, exStyle);
+
+        if (!adjusted)
+        {
+            return content;
+        }
+
+        return new Bounds(rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top);
     }
 
     private bool AttachTo(IntPtr parent, Bounds bounds, bool raisedZOrder, IntPtr defView)
     {
-        PrepareAsChild(_hwnd);
+        PrepareEmbeddedStyle(_hwnd);
 
-        var local = ScreenToParentClient(parent, bounds);
         Win32.SetParent(_hwnd, parent);
+        // Still WS_POPUP (never WS_CHILD) even after SetParent — confirmed by live-capturing
+        // xdiary's own embedded window, which stays WS_POPUP the whole time it's parented into
+        // SysListView32. A WS_POPUP window keeps interpreting SetWindowPos coordinates as
+        // absolute screen coordinates regardless of its parent, so bounds needs no
+        // parent-relative conversion here (and, more importantly, none later either — see
+        // Reposition — which is what lets position/size change while staying embedded).
         Win32.SetWindowPos(
             _hwnd,
             IntPtr.Zero,
-            local.X,
-            local.Y,
+            bounds.X,
+            bounds.Y,
             bounds.Width,
             bounds.Height,
             Win32.SWP_NOACTIVATE | Win32.SWP_FRAMECHANGED);
@@ -210,14 +280,47 @@ internal sealed class DesktopEmbedService
         return ok;
     }
 
-    private void ShowAt(Bounds bounds, bool parentRelative)
+    private void ShowAt(Bounds bounds)
     {
-        var local = parentRelative && _embedParent != IntPtr.Zero
-            ? ScreenToParentClient(_embedParent, bounds)
-            : bounds;
-        Win32.SetWindowPos(_hwnd, IntPtr.Zero, local.X, local.Y, bounds.Width, bounds.Height, Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE);
+        Win32.SetWindowPos(_hwnd, IntPtr.Zero, bounds.X, bounds.Y, bounds.Width, bounds.Height, Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE);
         Win32.ShowWindow(_hwnd, Win32.SW_SHOW);
         ForceRecomposite(_hwnd);
+    }
+
+    /// <summary>
+    /// Moves/resizes the host in place to <paramref name="contentBounds"/> — the same
+    /// technique live-captured from xdiary's own position/size stepper buttons: plain
+    /// <c>SetWindowPos</c> with absolute screen coordinates, called directly on the
+    /// still-<c>WS_POPUP</c> host with no <c>SetParent</c>/style dance beforehand. Works
+    /// whether currently embedded or floating — no <see cref="Undock"/> round-trip required
+    /// just to change position or size. Goes through <see cref="ContentToWindowRect"/> so
+    /// <paramref name="contentBounds"/> always means the visible content size (matching
+    /// <see cref="GetCurrentBounds"/>), border or not.
+    /// </summary>
+    public bool Reposition(Bounds contentBounds)
+    {
+        lock (_gate)
+        {
+            if (_hwnd == IntPtr.Zero || !Win32.IsWindow(_hwnd))
+            {
+                return false;
+            }
+
+            var windowRect = ContentToWindowRect(_hwnd, contentBounds);
+            Win32.SetWindowPos(
+                _hwnd,
+                IntPtr.Zero,
+                windowRect.X,
+                windowRect.Y,
+                windowRect.Width,
+                windowRect.Height,
+                Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE);
+            ForceRecomposite(_hwnd);
+            DiagLog.Write(
+                $"Reposition: content -> ({contentBounds.X},{contentBounds.Y}) " +
+                $"{contentBounds.Width}x{contentBounds.Height} (embedded={IsEmbedded})");
+            return true;
+        }
     }
 
     private void StartMaintenance(Bounds bounds)
@@ -250,19 +353,27 @@ internal sealed class DesktopEmbedService
         _maintenance = null;
     }
 
-    private static void PrepareAsChild(IntPtr hwnd)
+    /// <summary>
+    /// Headless embedded look — no caption/sysmenu/min-max box/thick frame — but deliberately
+    /// keeps <c>WS_POPUP</c> rather than switching to <c>WS_CHILD</c>. Live-capturing xdiary's
+    /// own embedded window showed it does the same: stays <c>WS_POPUP</c> the whole time it's
+    /// <c>SetParent</c>'d into <c>SysListView32</c>, which is what lets <see cref="Reposition"/>
+    /// move/resize it later using plain absolute screen coordinates, embedded or not.
+    /// </summary>
+    private static void PrepareEmbeddedStyle(IntPtr hwnd)
     {
         var style = Win32.GetWindowLongPtrCompat(hwnd, Win32.GWL_STYLE).ToInt64();
-        style |= Win32.WS_CHILD | Win32.WS_VISIBLE;
-        style &= ~unchecked((long)Win32.WS_POPUP);
+        style |= Win32.WS_POPUP | Win32.WS_VISIBLE;
+        style &= ~unchecked((long)Win32.WS_CHILD);
         style &= ~(Win32.WS_CAPTION | Win32.WS_SYSMENU | Win32.WS_MINIMIZEBOX | Win32.WS_MAXIMIZEBOX | Win32.WS_THICKFRAME);
         Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_STYLE, new IntPtr(style));
     }
 
     /// <summary>
-    /// Inverse of <see cref="PrepareAsChild"/> — top-level again (no WS_CHILD), headless (no
-    /// caption/sysmenu/min/max box — <see cref="DesktopHostWindow"/> stays chromeless), but
-    /// with <c>WS_THICKFRAME</c> so the native sizing border still works on all 4 edges/corners.
+    /// Same headless look as <see cref="PrepareEmbeddedStyle"/>, plus <c>WS_THICKFRAME</c> so
+    /// the native sizing border works on all 4 edges/corners once floating (no title bar,
+    /// system menu, or min/max box — <see cref="DesktopHostWindow"/> stays chromeless either
+    /// way).
     /// </summary>
     private static void RestoreTopLevelStyle(IntPtr hwnd)
     {
@@ -271,17 +382,6 @@ internal sealed class DesktopEmbedService
         style &= ~(Win32.WS_CAPTION | Win32.WS_SYSMENU | Win32.WS_MINIMIZEBOX | Win32.WS_MAXIMIZEBOX);
         style |= Win32.WS_POPUP | Win32.WS_VISIBLE | Win32.WS_THICKFRAME;
         Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_STYLE, new IntPtr(style));
-    }
-
-    private static Bounds ScreenToParentClient(IntPtr parent, Bounds screen)
-    {
-        var pt = new Win32.POINT { X = screen.X, Y = screen.Y };
-        if (!Win32.ScreenToClient(parent, ref pt))
-        {
-            return screen;
-        }
-
-        return new Bounds(pt.X, pt.Y, screen.Width, screen.Height);
     }
 
     private static bool IsParentedTo(IntPtr hwnd, IntPtr expected)

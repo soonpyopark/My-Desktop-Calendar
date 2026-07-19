@@ -125,6 +125,21 @@ internal static class Win32
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
     [DllImport("user32.dll")]
+    public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool AdjustWindowRectEx(ref RECT lpRect, int dwStyle, bool bMenu, int dwExStyle);
+
+    /// <summary>Per-monitor-DPI-aware variant (Windows 10 1607+) — the app declares PerMonitorV2
+    /// in app.manifest, so this (rather than the plain AdjustWindowRectEx) is what correctly
+    /// sizes the added resize border on hi-DPI monitors.</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool AdjustWindowRectExForDpi(ref RECT lpRect, int dwStyle, bool bMenu, int dwExStyle, uint dpi);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetDpiForWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
     public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
 
     [DllImport("user32.dll")]

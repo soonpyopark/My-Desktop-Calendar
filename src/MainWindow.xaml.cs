@@ -114,6 +114,38 @@ public partial class MainWindow : Window
 
     private void ExitButton_Click(object sender, RoutedEventArgs e) => ExitApp();
 
+    // Position/size steppers — the technique live-captured from xdiary's own desktopcal.exe:
+    // its embedded calendar window never leaves WS_POPUP, so its own position/size buttons
+    // just SetWindowPos with new absolute screen coordinates directly, with no undock/re-embed
+    // round-trip. DesktopEmbedService.Reposition mirrors that (see its doc comment), so these
+    // buttons work identically whether the surface is currently embedded or floating.
+    private const int Step = 20;
+
+    private void MoveUp_Click(object sender, RoutedEventArgs e) => AdjustBounds(0, -Step, 0, 0);
+    private void MoveDown_Click(object sender, RoutedEventArgs e) => AdjustBounds(0, Step, 0, 0);
+    private void MoveLeft_Click(object sender, RoutedEventArgs e) => AdjustBounds(-Step, 0, 0, 0);
+    private void MoveRight_Click(object sender, RoutedEventArgs e) => AdjustBounds(Step, 0, 0, 0);
+    private void WidthMinus_Click(object sender, RoutedEventArgs e) => AdjustBounds(0, 0, -Step, 0);
+    private void WidthPlus_Click(object sender, RoutedEventArgs e) => AdjustBounds(0, 0, Step, 0);
+    private void HeightMinus_Click(object sender, RoutedEventArgs e) => AdjustBounds(0, 0, 0, -Step);
+    private void HeightPlus_Click(object sender, RoutedEventArgs e) => AdjustBounds(0, 0, 0, Step);
+
+    private void AdjustBounds(int dx, int dy, int dw, int dh)
+    {
+        var current = _embed.GetCurrentBounds();
+        if (current is null)
+        {
+            return;
+        }
+
+        var next = new DesktopEmbedService.Bounds(
+            current.X + dx,
+            current.Y + dy,
+            Math.Max(80, current.Width + dw),
+            Math.Max(60, current.Height + dh));
+        _embed.Reposition(next);
+    }
+
     private void ExitApp()
     {
         _reallyClosing = true;
