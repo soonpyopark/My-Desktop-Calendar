@@ -1487,15 +1487,14 @@ internal sealed class DesktopEmbedService
             EmbedStrategy.WorkerW => ["workerw", "raised"],
             EmbedStrategy.Progman => ["progman", "raised"],
             EmbedStrategy.ZOrder => ["zorder", "auto"],
-            // Prefer the proven WS_CHILD chain (classic WorkerW vs Win11 raised, then explicit
-            // fallbacks) first — it parents as a *sibling* of SHELLDLL_DefView and explicitly
-            // z-orders the icons above the calendar (see ApplyRaisedZOrder), which is what makes
-            // the calendar sit visually behind the desktop icons. SysListView32/WS_POPUP gets
-            // native click passthrough, but since it parents *inside* SysListView32 itself, a
-            // child window can never be pushed behind its own parent's icon painting no matter
-            // how its z-order is set — it always draws on top of every icon. Kept as the last
-            // resort only, for the rare case where the shell can't be reparented under normal.
-            _ => ["auto", "raised", "workerw", "progman", "syslistview32"],
+            // Prefer SysListView32/WS_POPUP first — it parents *inside* the icon ListView itself,
+            // so the calendar draws on top of the desktop icons, and real mouse input reaches
+            // WebView2 natively (no UndockZoneMonitor click-zone polling needed). Falls back to
+            // the WS_CHILD chain (classic WorkerW vs Win11 raised, then explicit fallbacks) when
+            // SysListView32 can't be found/verified — that chain parents as a *sibling* of
+            // SHELLDLL_DefView and z-orders the icons above the calendar instead (calendar sits
+            // behind icons).
+            _ => ["syslistview32", "auto", "raised", "workerw", "progman"],
         };
     }
 
