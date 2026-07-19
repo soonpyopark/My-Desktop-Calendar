@@ -244,7 +244,8 @@
   }
 
   .day-cell.other-month .day-number .solar,
-  .day-cell.other-month .day-number .lunar {
+  .day-cell.other-month .day-number .lunar,
+  .day-cell.other-month .day-number .solar-term {
     color: var(--gcal-other-month-text);
   }
 
@@ -280,6 +281,13 @@
   .day-number .lunar {
     @apply leading-none text-gcal-muted;
     font-size: clamp(9px, 1.3vh, 11px);
+  }
+
+  /** 24절기(예: 춘분) — 연한 빨강. (다른 달 셀은 위 .other-month 규칙이 흐리게 덮어씀) */
+  .day-number .solar-term {
+    @apply leading-none;
+    font-size: clamp(9px, 1.3vh, 11px);
+    color: #e57373;
   }
 
   .day-number .lunar-measure {

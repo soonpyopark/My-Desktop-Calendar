@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  My Desktop Calendar — per-user MSI (no admin rights required).
+
+  Built by scripts/build-msi.mjs, which stages the self-contained `dotnet publish`
+  output into "My Desktop Calendar\" next to this file, then invokes:
+    wix build Product.wxs -d ProductVersion=... -d ProductCode={guid} -bindpath <msi>
+      -ext WixToolset.UI.wixext -o "...msi"
+
+  UpgradeCode below MUST stay constant across every release — it is what lets a newer
+  MSI silently replace an older one (MajorUpgrade). ProductCode changes on every build
+  (passed in via -d) so each build is a distinct upgrade target and old Add/Remove
+  Programs entries get cleaned up automatically.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package
+    Name="My Desktop Calendar"
+    Manufacturer="My Desktop Calendar"
+    Version="$(ProductVersion)"
+    ProductCode="$(ProductCode)"
+    UpgradeCode="83D48A17-D4CE-4A01-ADC3-9B11EDD37D19"
+    Scope="perUser"
+    Codepage="65001"
+    Compressed="yes">
+
+    <SummaryInformation Manufacturer="My Desktop Calendar" Description="My Desktop Calendar 설치 관리자" />
+
+    <MajorUpgrade
+      AllowSameVersionUpgrades="yes"
+      DowngradeErrorMessage="이미 더 최신 버전의 [ProductName]이 설치되어 있습니다." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon.ico" SourceFile="$(MsiDir)\My Desktop Calendar\app-icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://note4all.tistory.com" />
+
+    <!-- ARPNOMODIFY is already set by the WixUI_Minimal library — authoring it again
+         here collides with that built-in Property (WIX0091). -->
+    <WixVariable Id="WixUILicenseRtf" Value="$(MsiDir)\License.rtf" />
+    <ui:WixUI Id="WixUI_Minimal" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="INSTALLFOLDER" Name="My Desktop Calendar">
+        <!-- Harvests the entire self-contained publish output (hundreds of runtime
+             DLLs, satellite resource folders, wwwroot, seed, …) without hand-authoring
+             a <Component>/<File> per item. .pdb is the only thing deliberately dropped
+             (debug symbols — not useful to end users, only inflates the installer). -->
+        <Files Include="$(MsiDir)\My Desktop Calendar\**">
+          <Exclude Files="**\*.pdb" />
+        </Files>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="*">
+        <Shortcut
+          Id="StartMenuShortcutLnk"
+          Name="My Desktop Calendar"
+          Target="[INSTALLFOLDER]My Desktop Calendar.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="AppIcon.ico" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\My Desktop Calendar"
+          Name="StartMenuShortcut"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="*">
+        <Shortcut
+          Id="DesktopShortcutLnk"
+          Name="My Desktop Calendar"
+          Target="[INSTALLFOLDER]My Desktop Calendar.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="AppIcon.ico" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\My Desktop Calendar"
+          Name="DesktopShortcut"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+  </Package>
+</Wix>

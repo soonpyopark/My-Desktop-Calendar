@@ -4,7 +4,7 @@ export const DEFAULT_PORT = 3010;
 import { CALENDAR_COLOR_PALETTE } from './calendarColorPalette.js';
 
 /** Application display version. */
-export const APP_VERSION = '1.1.5';
+export const APP_VERSION = '1.1.6';
 
 /** Application display name. */
 export const APP_NAME = 'My Desktop Calendar';

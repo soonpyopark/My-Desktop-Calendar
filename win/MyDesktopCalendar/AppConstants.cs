@@ -3,7 +3,7 @@ namespace MyDesktopCalendar;
 internal static class AppConstants
 {
     public const string AppName = "My Desktop Calendar";
-    public const string AppVersion = "1.1.5";
+    public const string AppVersion = "1.1.6";
     public const string AppTitle = $"{AppName} v{AppVersion}";
     public const string SiteUrl = "https://note4all.tistory.com";
     public const string DefaultDataDir = "data";

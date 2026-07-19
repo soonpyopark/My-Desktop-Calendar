@@ -86,7 +86,7 @@ const MonthWeekRow = memo(function MonthWeekRow({
         const selected = isSameDay(date, selectedDate);
         const isToday = isSameDay(date, today);
         const weekdayClass = getWeekdayCellClass(date.getDay());
-        const { solar, lunar, lunarDay } = getDayParts(
+        const { solar, lunar, lunarDay, solarTerm } = getDayParts(
           date.getFullYear(),
           date.getMonth() + 1,
           date.getDate(),
@@ -129,7 +129,7 @@ const MonthWeekRow = memo(function MonthWeekRow({
             tabIndex={interactive ? 0 : undefined}
             aria-disabled={!interactive || undefined}
           >
-            <DayNumber solar={solar} lunarLabel={lunar} lunarDay={lunarDay} />
+            <DayNumber solar={solar} lunarLabel={lunar} lunarDay={lunarDay} solarTerm={solarTerm} />
             <div className="day-events">
               {visibleSegments.map(({ event, segment, label, continuation }, displayLane) => {
                 const cal = calendarById.get(event.calendarId);

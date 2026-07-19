@@ -1,4 +1,5 @@
 import { toLunar } from 'kor-lunar';
+import { getSolarTermLabel } from './solarTerms.js';
 
 /**
  * @param {number} year
@@ -42,6 +43,7 @@ export function getDayParts(year, month, day) {
     solar: day,
     lunar: formatLunarDayLabel(lunar),
     lunarDay: lunar.day || null,
+    solarTerm: getSolarTermLabel(year, month, day),
   };
 }
 

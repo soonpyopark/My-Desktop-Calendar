@@ -1,9 +1,10 @@
 import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 
-export default function DayNumber({ solar, lunarLabel, lunarDay }) {
+export default function DayNumber({ solar, lunarLabel, lunarDay, solarTerm }) {
   const rootRef = useRef(null);
   const measureRef = useRef(null);
-  const fullDisplay = `(${lunarLabel})`;
+  const termSuffix = solarTerm ? ` ${solarTerm}` : '';
+  const fullDisplay = `(${lunarLabel})${termSuffix}`;
   const [useShortLabel, setUseShortLabel] = useState(false);
 
   const measure = useCallback(() => {
@@ -16,7 +17,7 @@ export default function DayNumber({ solar, lunarLabel, lunarDay }) {
 
     const gap = Number.parseFloat(getComputedStyle(root).columnGap || getComputedStyle(root).gap) || 0;
     setUseShortLabel(solarEl.offsetWidth + gap + measureEl.offsetWidth > root.clientWidth);
-  }, [lunarLabel]);
+  }, [lunarLabel, termSuffix]);
 
   useLayoutEffect(() => {
     measure();
@@ -37,7 +38,7 @@ export default function DayNumber({ solar, lunarLabel, lunarDay }) {
       observer.disconnect();
       if (raf) window.cancelAnimationFrame(raf);
     };
-  }, [measure, solar, lunarLabel]);
+  }, [measure, solar, lunarLabel, termSuffix]);
 
   return (
     <div className="day-number" ref={rootRef}>
@@ -50,6 +51,7 @@ export default function DayNumber({ solar, lunarLabel, lunarDay }) {
           <span className="lunar" title={useShortLabel ? fullDisplay : undefined}>
             ({useShortLabel ? lunarDay : lunarLabel})
           </span>
+          {solarTerm && <span className="solar-term">{solarTerm}</span>}
         </>
       )}
     </div>

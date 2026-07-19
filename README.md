@@ -1,4 +1,4 @@
-# My Desktop Calendar v1.1.5
+# My Desktop Calendar v1.1.6
 
 Windows 전용 데스크톱 캘린더입니다. **WPF (.NET 8) 네이티브 셸** + **React UI**(WebView2)로 동작합니다.
 

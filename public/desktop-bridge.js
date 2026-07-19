@@ -579,7 +579,7 @@
       window.open(url, '_blank', 'noopener,noreferrer');
     },
     showAbout: async () => {
-      let appTitle = 'My Desktop Calendar v1.1.5';
+      let appTitle = 'My Desktop Calendar v1.1.6';
       try {
         const data = await api('GET', '/api/health');
         if (data?.name && data?.version) {
@@ -643,7 +643,7 @@
       window.dispatchEvent(new CustomEvent('mycalendar:nativeReady'));
       await window.myCalendarTray?.setupTray?.();
       if (Neutralino.window?.setTitle) {
-        await Neutralino.window.setTitle('My Desktop Calendar v1.1.5');
+        await Neutralino.window.setTitle('My Desktop Calendar v1.1.6');
       }
       if (Neutralino.app?.exitProcessOnClose !== undefined) {
         Neutralino.app.exitProcessOnClose = false;
