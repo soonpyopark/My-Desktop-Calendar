@@ -534,35 +534,32 @@ public partial class MainWindow : Window
         await InitWebViewAsync();
         _bridge.ApplyFrameThemeFromSettings();
 
-        var settings = _store.ReadStore()["settings"]?.AsObject();
-        var launchMode = settings?["widget"]?["launchMode"]?.GetValue<string>()
-            ?? (settings?["widget"]?["enabled"]?.GetValue<bool>() == true ? "desktop" : "window");
-
-        if (string.Equals(launchMode, "desktop", StringComparison.OrdinalIgnoreCase))
+        // Desktop mode is always the launch default — every app start (manual launch or
+        // Windows-startup auto-run) embeds into the desktop, regardless of whichever mode
+        // was last persisted. 창모드 is only a manual, in-session tool for resizing/repositioning;
+        // it is never the mode the app boots back into.
+        // Defer first desktop surface until UI paints once.
+        _ = Dispatcher.BeginInvoke(async () =>
         {
-            // Defer first desktop surface until UI paints once.
-            _ = Dispatcher.BeginInvoke(async () =>
+            await Task.Delay(400);
+            try
             {
-                await Task.Delay(400);
-                try
-                {
-                    // If the React login wall already opened on App (not logged in yet) and
-                    // claimed the suspend flag, embed Host but keep App visible on top instead
-                    // of cloaking it away from under the open dialog — App.jsx resumes desktop
-                    // embed itself once the dialog closes, same as every other temporary unlock.
-                    // Re-checked right before the actual cloak decision (see shouldCloakApp
-                    // doc) so a claim landing mid-await (Host webview cold-start) still wins.
-                    await _surfaces.EnterDesktopModeAsync(
-                        _embed.LockedBounds ?? CapturePhysicalBounds(),
-                        shouldCloakApp: () => !_bridge.IsEmbedSuspended);
-                    _bridge.NotifyWidgetStatus();
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"바탕화면 임베드 실패: {ex.Message}", AppConstants.AppTitle);
-                }
-            }, System.Windows.Threading.DispatcherPriority.Background);
-        }
+                // If the React login wall already opened on App (not logged in yet) and
+                // claimed the suspend flag, embed Host but keep App visible on top instead
+                // of cloaking it away from under the open dialog — App.jsx resumes desktop
+                // embed itself once the dialog closes, same as every other temporary unlock.
+                // Re-checked right before the actual cloak decision (see shouldCloakApp
+                // doc) so a claim landing mid-await (Host webview cold-start) still wins.
+                await _surfaces.EnterDesktopModeAsync(
+                    _embed.LockedBounds ?? CapturePhysicalBounds(),
+                    shouldCloakApp: () => !_bridge.IsEmbedSuspended);
+                _bridge.NotifyWidgetStatus();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"바탕화면 임베드 실패: {ex.Message}", AppConstants.AppTitle);
+            }
+        }, System.Windows.Threading.DispatcherPriority.Background);
     }
 
     /// <summary>
@@ -959,13 +956,13 @@ public partial class MainWindow : Window
         {
             menu.ImageScalingSize = new System.Drawing.Size(16, 16);
             var appBmp = AppIcons.GetAppIcon().ToBitmap();
-            menu.Items.Add("창 모드 (Unlock)", appBmp, (_, _) => RunOnUi(ShowFromTray));
+            menu.Items.Add("바탕화면 모드", appBmp, (_, _) => RunOnUi(EnterDesktopModeFromTray));
         }
         catch
         {
-            menu.Items.Add("창 모드 (Unlock)", null, (_, _) => RunOnUi(ShowFromTray));
+            menu.Items.Add("바탕화면 모드", null, (_, _) => RunOnUi(EnterDesktopModeFromTray));
         }
-        menu.Items.Add("바탕화면 모드", null, (_, _) => RunOnUi(EnterDesktopModeFromTray));
+        menu.Items.Add("창 모드 (Unlock)", null, (_, _) => RunOnUi(ShowFromTray));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("정보", null, (_, _) => RunOnUi(() =>
         {

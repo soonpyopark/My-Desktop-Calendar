@@ -168,38 +168,9 @@ export function normalizeEmbedStrategy(value) {
   return EMBED_STRATEGY.AUTO;
 }
 
-/**
- * LL mouse input forward while embedded.
- * - auto: off (pointer smoothness — 24H2 lag reports). Unlock zones still work via click-undock.
- * - on: force forward (useful on raised/24H2+ when calendar must receive clicks without undock)
- * - off: never
- */
-export const INPUT_FORWARD_MODE = {
-  AUTO: 'auto',
-  ON: 'on',
-  OFF: 'off',
-};
-
-/** @type {readonly string[]} */
-export const INPUT_FORWARD_MODE_OPTIONS = Object.values(INPUT_FORWARD_MODE);
-
-/**
- * @param {unknown} value
- * @returns {'auto' | 'on' | 'off'}
- */
-export function normalizeInputForwardMode(value) {
-  const key = String(value ?? '')
-    .trim()
-    .toLowerCase();
-  if (INPUT_FORWARD_MODE_OPTIONS.includes(key)) {
-    return /** @type {'auto' | 'on' | 'off'} */ (key);
-  }
-  return INPUT_FORWARD_MODE.AUTO;
-}
-
 export const DEFAULT_WIDGET_SETTINGS = {
-  launchMode: WIDGET_LAUNCH_MODE.WINDOW,
-  enabled: false,
+  launchMode: WIDGET_LAUNCH_MODE.DESKTOP,
+  enabled: true,
   alwaysOnTop: false,
   /** @deprecated Window transparency removed; kept for settings.json compat. */
   opacity: 1,
@@ -210,8 +181,6 @@ export const DEFAULT_WIDGET_SETTINGS = {
   chromeBottomInset: 0,
   /** @type {'auto' | 'raised' | 'workerw' | 'progman' | 'zorder'} */
   embedStrategy: EMBED_STRATEGY.AUTO,
-  /** @type {'auto' | 'on' | 'off'} */
-  inputForward: INPUT_FORWARD_MODE.AUTO,
   bounds: { ...DEFAULT_DESKTOP_WIDGET_BOUNDS },
   margins: { ...DEFAULT_DESKTOP_WIDGET_MARGINS },
 };

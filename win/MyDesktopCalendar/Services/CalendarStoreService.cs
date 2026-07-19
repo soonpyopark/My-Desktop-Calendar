@@ -2005,8 +2005,6 @@ internal sealed class CalendarStoreService
         merged["enabled"] = launchMode == "desktop";
         merged["embedStrategy"] = NormalizeEmbedStrategy(
             GetStringOrNull(inputWidget, "embedStrategy") ?? GetStringOrNull(merged, "embedStrategy"));
-        merged["inputForward"] = NormalizeInputForwardMode(
-            GetStringOrNull(inputWidget, "inputForward") ?? GetStringOrNull(merged, "inputForward"));
         merged["opacity"] = Math.Clamp(GetDouble(merged, "opacity", AppConstants.DefaultOpacity), AppConstants.MinOpacity, 1.0);
         merged["chromeTopInset"] = ClampInt(GetDouble(inputWidget, "chromeTopInset", 0), 0, 200);
         merged["chromeLeftInset"] = ClampInt(GetDouble(inputWidget, "chromeLeftInset", 0), 0, 80);
@@ -2031,14 +2029,6 @@ internal sealed class CalendarStoreService
     {
         var key = (value ?? "").Trim().ToLowerInvariant();
         return Array.IndexOf(EmbedStrategyOptions, key) >= 0 ? key : "auto";
-    }
-
-    private static readonly string[] InputForwardOptions = ["auto", "on", "off"];
-
-    private static string NormalizeInputForwardMode(string? value)
-    {
-        var key = (value ?? "").Trim().ToLowerInvariant();
-        return Array.IndexOf(InputForwardOptions, key) >= 0 ? key : "auto";
     }
 
     private static JsonObject NormalizeCalendarCustomFlag(JsonObject calendar)
@@ -2280,8 +2270,8 @@ internal sealed class CalendarStoreService
             },
             ["widget"] = new JsonObject
             {
-                ["launchMode"] = "window",
-                ["enabled"] = false,
+                ["launchMode"] = "desktop",
+                ["enabled"] = true,
                 ["alwaysOnTop"] = false,
                 ["opacity"] = AppConstants.DefaultOpacity,
                 ["chromeTopInset"] = 0,
@@ -2289,7 +2279,6 @@ internal sealed class CalendarStoreService
                 ["chromeRightInset"] = 0,
                 ["chromeBottomInset"] = 0,
                 ["embedStrategy"] = "auto",
-                ["inputForward"] = "auto",
                 ["bounds"] = new JsonObject { ["x"] = 400, ["y"] = 60, ["width"] = 1480, ["height"] = 950 },
                 ["margins"] = new JsonObject { ["left"] = 0.2, ["top"] = 0.05, ["right"] = 0.05, ["bottom"] = 0.05 },
             },

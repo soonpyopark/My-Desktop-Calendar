@@ -15,3 +15,20 @@ export function sortCalendarsByOrder(calendars) {
     })
     .map(({ calendar }) => calendar);
 }
+
+/**
+ * Default calendar for a brand-new event: whichever editable calendar currently sits at the
+ * TOP of the user's own "내 캘린더" drag-and-drop order (see {@link sortCalendarsByOrder}) — not
+ * just the first entry in the raw store array. Prefers a visible calendar at/after the top of
+ * the order (picking a hidden one by default would create events the user can't immediately see).
+ * @param {object[]} calendars
+ * @param {string} excludeId calendar id to exclude (e.g. the read-only Korean holidays calendar)
+ * @param {string} fallbackId used when no editable calendar exists at all
+ */
+export function getDefaultCalendarId(calendars, excludeId, fallbackId = 'primary') {
+  const ordered = sortCalendarsByOrder(
+    (calendars ?? []).filter((calendar) => calendar.id !== excludeId),
+  );
+  if (!ordered.length) return fallbackId;
+  return ordered.find((calendar) => calendar.visible !== false)?.id ?? ordered[0].id;
+}

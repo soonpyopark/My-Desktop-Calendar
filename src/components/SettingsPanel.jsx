@@ -6,9 +6,7 @@ import {
   DEFAULT_WIDGET_SETTINGS,
   EMBED_STRATEGY,
   HOLIDAYS_KR_CALENDAR_ID,
-  INPUT_FORWARD_MODE,
   normalizeEmbedStrategy,
-  normalizeInputForwardMode,
 } from '../../shared/constants.js';
 import { applyColorScheme, getColorScheme, normalizeColorScheme } from '../lib/colorScheme.js';
 import { applyAccentColor, getAccentColor, normalizeAccentColor } from '../lib/accentColor.js';
@@ -138,9 +136,6 @@ function ViewOptionsPanel({ settings, onSaveSettings }) {
   const [embedStrategy, setEmbedStrategy] = useState(() =>
     normalizeEmbedStrategy(initialWidget.embedStrategy),
   );
-  const [inputForward, setInputForward] = useState(() =>
-    normalizeInputForwardMode(initialWidget.inputForward),
-  );
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -153,7 +148,6 @@ function ViewOptionsPanel({ settings, onSaveSettings }) {
     setAccentColor(getAccentColor(next));
     setRunAtStartup(next.runAtStartup !== false);
     setEmbedStrategy(normalizeEmbedStrategy(nextWidget.embedStrategy));
-    setInputForward(normalizeInputForwardMode(nextWidget.inputForward));
   }, [settings]);
 
   const buildViewOptions = (patch = {}) => ({
@@ -230,12 +224,6 @@ function ViewOptionsPanel({ settings, onSaveSettings }) {
     await persistWidget({ embedStrategy: normalized });
   };
 
-  const handleInputForwardChange = async (next) => {
-    const normalized = normalizeInputForwardMode(next);
-    setInputForward(normalized);
-    await persistWidget({ inputForward: normalized });
-  };
-
   const themeOptions = [
     { value: 'light', label: '라이트 모드' },
     { value: 'dark', label: '다크 모드' },
@@ -248,12 +236,6 @@ function ViewOptionsPanel({ settings, onSaveSettings }) {
     { value: EMBED_STRATEGY.WORKERW, label: 'WorkerW (고전)' },
     { value: EMBED_STRATEGY.PROGMAN, label: 'Progman' },
     { value: EMBED_STRATEGY.ZORDER, label: 'Z-order (폴백)' },
-  ];
-
-  const inputForwardOptions = [
-    { value: INPUT_FORWARD_MODE.AUTO, label: '자동 (포인터 우선, 기본 끔)' },
-    { value: INPUT_FORWARD_MODE.ON, label: '켜기 (클릭 전달)' },
-    { value: INPUT_FORWARD_MODE.OFF, label: '끄기' },
   ];
 
   return (
@@ -325,9 +307,8 @@ function ViewOptionsPanel({ settings, onSaveSettings }) {
       <div className="mt-8">
         <h3 className="mb-3 text-[22px] font-normal text-gcal-heading">바탕화면 임베드</h3>
         <p className="mb-4 text-sm text-gcal-muted">
-          Windows 버전마다 셸 구조가 달라 전환/포인터 동작이 다를 수 있습니다. 문제가 있으면
-          전략을 수동으로 바꿔 보세요. (25H2 전환 문제 → WorkerW 또는 Z-order 시도, 24H2 포인터
-          지연 → 입력 전달 끄기)
+          Windows 버전마다 셸 구조가 달라 전환 동작이 다를 수 있습니다. 문제가 있으면 전략을
+          수동으로 바꿔 보세요. (25H2 전환 문제 → WorkerW 또는 Z-order 시도)
         </p>
         <label className="mb-4 block text-sm text-gcal-body">
           <span className="mb-1 block text-xs text-gcal-muted">임베드 전략</span>
@@ -338,21 +319,6 @@ function ViewOptionsPanel({ settings, onSaveSettings }) {
             onChange={(e) => void handleEmbedStrategyChange(e.target.value)}
           >
             {embedStrategyOptions.map(({ value, label }) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="mb-4 block text-sm text-gcal-body">
-          <span className="mb-1 block text-xs text-gcal-muted">임베드 중 마우스 입력 전달</span>
-          <select
-            className="w-full rounded-lg border border-gcal-border bg-gcal-input px-3 py-2"
-            value={inputForward}
-            disabled={saving}
-            onChange={(e) => void handleInputForwardChange(e.target.value)}
-          >
-            {inputForwardOptions.map(({ value, label }) => (
               <option key={value} value={value}>
                 {label}
               </option>

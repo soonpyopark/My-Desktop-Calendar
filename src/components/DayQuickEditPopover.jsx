@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { HOLIDAYS_KR_CALENDAR_ID } from '../../shared/constants.js';
+import { getDefaultCalendarId } from '../../shared/calendarOrder.js';
 import { expandEventsForRange, getSeriesId } from '../../shared/eventOccurrences.js';
 import { toDateKey } from '../lib/calendarUtils.js';
 import { clampRectToViewport } from '../lib/popoverPosition.js';
@@ -29,13 +30,6 @@ import QuickEditTagButton from './QuickEditTagButton.jsx';
 const COLOR_PANEL_PAD = 8;
 const COLOR_PANEL_FALLBACK_WIDTH = 120;
 const COLOR_PANEL_FALLBACK_HEIGHT = 240;
-
-function getDefaultCalendarId(calendars) {
-  const editable = (calendars ?? []).filter(
-    (calendar) => calendar.id !== HOLIDAYS_KR_CALENDAR_ID && calendar.visible !== false,
-  );
-  return editable[0]?.id ?? calendars?.[0]?.id ?? 'primary';
-}
 
 /** Header + footer chrome around the body (matches CSS padding/borders roughly). */
 const QUICK_EDIT_CHROME_HEIGHT = 88;
@@ -91,7 +85,9 @@ export default function DayQuickEditPopover({
 }) {
   const [title, setTitle] = useState('');
   const [draftLinks, setDraftLinks] = useState([]);
-  const [draftCalendarId, setDraftCalendarId] = useState(() => getDefaultCalendarId(calendars));
+  const [draftCalendarId, setDraftCalendarId] = useState(
+    () => getDefaultCalendarId(calendars, HOLIDAYS_KR_CALENDAR_ID),
+  );
   const [draftTagIds, setDraftTagIds] = useState([]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteStyle, setPaletteStyle] = useState(null);
@@ -141,7 +137,7 @@ export default function DayQuickEditPopover({
   useEffect(() => {
     setTitle('');
     setDraftLinks([]);
-    setDraftCalendarId(getDefaultCalendarId(calendars));
+    setDraftCalendarId(getDefaultCalendarId(calendars, HOLIDAYS_KR_CALENDAR_ID));
     setDraftTagIds([]);
     setPaletteOpen(false);
     setSelectedEvent(focusEvent);
@@ -330,7 +326,7 @@ export default function DayQuickEditPopover({
         repeat: 'none',
         description: '',
         location: '',
-        calendarId: draftCalendarId || getDefaultCalendarId(calendars),
+        calendarId: draftCalendarId || getDefaultCalendarId(calendars, HOLIDAYS_KR_CALENDAR_ID),
         tagIds: normalizeTagIds(draftTagIds),
         completed: false,
         color: null,

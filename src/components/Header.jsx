@@ -892,21 +892,6 @@ export default function Header({
           {desktopWidgetAvailable && (
             <>
               <button
-                ref={windowModeBtnRef}
-                type="button"
-                className={cn(
-                  desktopModeIconBtnClass,
-                  softBlueIconBtnClass,
-                  isWindowModeActive && softBlueIconBtnMutedClass,
-                )}
-                aria-label="창모드"
-                aria-pressed={isWindowModeActive}
-                title="현재 위치·크기 그대로 일반 창으로 전환"
-                onClick={() => void handleEnterWindowMode()}
-              >
-                <WindowModeIcon />
-              </button>
-              <button
                 type="button"
                 data-ui-action="desktop-mode"
                 className={cn(
@@ -929,6 +914,21 @@ export default function Header({
                 onClick={() => void handleApplyDesktop()}
               >
                 <DesktopModeIcon />
+              </button>
+              <button
+                ref={windowModeBtnRef}
+                type="button"
+                className={cn(
+                  desktopModeIconBtnClass,
+                  softBlueIconBtnClass,
+                  isWindowModeActive && softBlueIconBtnMutedClass,
+                )}
+                aria-label="창모드"
+                aria-pressed={isWindowModeActive}
+                title="현재 위치·크기 그대로 일반 창으로 전환"
+                onClick={() => void handleEnterWindowMode()}
+              >
+                <WindowModeIcon />
               </button>
             </>
           )}

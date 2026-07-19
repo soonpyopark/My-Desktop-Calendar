@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { HOLIDAYS_KR_CALENDAR_ID } from '../../shared/constants.js';
+import { getDefaultCalendarId } from '../../shared/calendarOrder.js';
 import { toDateKey } from '../lib/calendarUtils.js';
 import { getCalendarTheme } from '../lib/colors.js';
 import { insertTextAtCursor } from '../lib/insertAtCursor.js';
@@ -59,12 +60,6 @@ function getEditableCalendars(calendars) {
   return (calendars ?? []).filter((calendar) => calendar.id !== HOLIDAYS_KR_CALENDAR_ID);
 }
 
-function getDefaultCalendarId(calendars) {
-  const editable = getEditableCalendars(calendars);
-  if (!editable.length) return 'primary';
-  return editable.find((calendar) => calendar.visible !== false)?.id ?? editable[0].id;
-}
-
 function resolveRepeatEndMode(event) {
   if (!event || (event.repeat ?? 'none') === 'none') return 'never';
   if (event.repeatUntil) return 'until';
@@ -97,7 +92,9 @@ export default function EventEditor({
   const [description, setDescription] = useState('');
   const [links, setLinks] = useState([]);
   const [linkDraft, setLinkDraft] = useState('');
-  const [calendarId, setCalendarId] = useState(() => getDefaultCalendarId(calendars));
+  const [calendarId, setCalendarId] = useState(
+    () => getDefaultCalendarId(calendars, HOLIDAYS_KR_CALENDAR_ID),
+  );
   const [markerShape, setMarkerShape] = useState(null);
   const [tagIds, setTagIds] = useState([]);
   const [attachments, setAttachments] = useState([]);
@@ -124,7 +121,7 @@ export default function EventEditor({
       setCalendarId(
         event.calendarId && event.calendarId !== HOLIDAYS_KR_CALENDAR_ID
           ? event.calendarId
-          : getDefaultCalendarId(calendars),
+          : getDefaultCalendarId(calendars, HOLIDAYS_KR_CALENDAR_ID),
       );
       setMarkerShape(event.markerShape ?? null);
       setTagIds(normalizeTagIds(event.tagIds));
@@ -144,7 +141,7 @@ export default function EventEditor({
     setRepeatEndMode('never');
     setRepeatUntil('');
     setRepeatCount('10');
-    setCalendarId(getDefaultCalendarId(calendars));
+    setCalendarId(getDefaultCalendarId(calendars, HOLIDAYS_KR_CALENDAR_ID));
     setMarkerShape(null);
     setAttachments([]);
   }, [open, event, calendars, defaultDate]);
