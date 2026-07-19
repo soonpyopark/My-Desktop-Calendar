@@ -1,0 +1,9 @@
+bin/
+obj/
+*.user
+.vs/
+src/webview2-data*/
+*.log
+.DS_Store
+publish/
+dragbar-verify.png
