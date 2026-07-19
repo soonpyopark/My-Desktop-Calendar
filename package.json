@@ -1,0 +1,49 @@
+{
+  "name": "my-desktop-calendar",
+  "version": "1.1.5",
+  "description": "My Desktop Calendar — Windows native (WPF) desktop calendar",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "preview": "vite preview --port 3010 --strictPort",
+    "test:occurrences": "node scripts/test-event-occurrences.mjs",
+    "sync-version": "node scripts/sync-version.mjs",
+    "win:sync-ui": "node scripts/sync-win-ui.mjs",
+    "win:build": "npm run build && npm run win:sync-ui && dotnet build win/MyDesktopCalendar/MyDesktopCalendar.csproj -c Release",
+    "win:run": "npm run win:build && dotnet run --project win/MyDesktopCalendar/MyDesktopCalendar.csproj -c Release --no-build",
+    "win:stop": "node scripts/win-stop.mjs",
+    "win:publish": "node -e \"require('fs').rmSync('dist-win',{recursive:true,force:true})\" && npm run build && npm run win:sync-ui && dotnet publish win/MyDesktopCalendar/MyDesktopCalendar.csproj -c Release -r win-x64 --self-contained true -o dist-win",
+    "webview2:fetch-installer": "node scripts/fetch-webview2-installer.mjs",
+    "build:msi": "node scripts/build-msi.mjs",
+    "build:dist:msi": "node scripts/build-msi.mjs",
+    "update:all": "node scripts/update-all.mjs",
+    "build:update_all": "update_all.bat _inner build"
+  },
+  "keywords": [
+    "calendar",
+    "desktop",
+    "windows",
+    "wpf",
+    "lunar",
+    "korean"
+  ],
+  "author": "Daniel Park",
+  "license": "MIT",
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.5.2",
+    "postcss": "^8.5.16",
+    "tailwindcss": "^3.4.19",
+    "vite": "^6.0.5",
+    "vite-plugin-node-polyfills": "^0.28.0"
+  },
+  "dependencies": {
+    "buffer": "^6.0.3",
+    "exceljs": "^4.4.0",
+    "kor-lunar": "^1.6.1",
+    "pdfkit": "^0.19.1",
+    "process": "^0.11.10",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}

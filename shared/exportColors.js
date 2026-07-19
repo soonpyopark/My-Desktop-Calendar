@@ -1,0 +1,15 @@
+export const EXPORT_COLORS = {
+  sunday: '#d50000',
+  saturday: '#039be5',
+  heading: '#202124',
+  body: '#3c4043',
+  muted: '#70757a',
+  otherMonth: '#bdc1c6',
+  border: '#e8eaed',
+  surface: '#f8f9fa',
+  weekColumnBg: '#f8f9fa',
+  weekdayHeaderBg: '#f8f9fa',
+  todayBg: '#e8f0fe',
+  todayCircle: '#1a73e8',
+  lunarBlue: '#174ea6',
+};
