@@ -1715,7 +1715,7 @@ export default function App() {
               delete current[dayKey];
             }
             // Fire-and-forget: updateSettings already applies dayColors optimistically
-            // so the cell/trigger update on the double-click frame, not after PATCH.
+            // so the cell paints on the same click frame, not after the PATCH round-trip.
             void updateSettings({ dayColors: current }).catch((err) => {
               void alert(err instanceof Error ? err.message : '날짜 색상을 저장하지 못했습니다.');
             });

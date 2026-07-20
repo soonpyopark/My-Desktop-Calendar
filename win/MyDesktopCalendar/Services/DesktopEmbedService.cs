@@ -483,7 +483,14 @@ internal sealed class DesktopEmbedService
            && Math.Abs(a.Width - b.Width) <= 1
            && Math.Abs(a.Height - b.Height) <= 1;
 
-    /// <summary>Park the calendar under ordinary app windows (desktop wallpaper band).</summary>
+    /// <summary>
+    /// Park the calendar just above Progman/the desktop icon layer — below every ordinary
+    /// app window, but above wallpaper + icons. Plain <c>HWND_BOTTOM</c> can land *below*
+    /// Progman/WorkerW (the actual desktop-icon layer), which leaves nothing for DWM to
+    /// blend against: <see cref="SetOpacity"/>'s LWA_ALPHA would then show black/empty
+    /// space behind the calendar at &lt;100% instead of letting the wallpaper/icons show
+    /// through it. Inserting explicitly after Progman's HWND guarantees a real backdrop.
+    /// </summary>
     private void ApplyDesktopZOrder()
     {
         if (_hwnd == IntPtr.Zero || !Win32.IsWindow(_hwnd))
@@ -491,9 +498,12 @@ internal sealed class DesktopEmbedService
             return;
         }
 
+        var progman = FindProgman();
+        var insertAfter = (progman != IntPtr.Zero && Win32.IsWindow(progman)) ? progman : Win32.HWND_BOTTOM;
+
         _ = Win32.SetWindowPos(
             _hwnd,
-            Win32.HWND_BOTTOM,
+            insertAfter,
             0,
             0,
             0,

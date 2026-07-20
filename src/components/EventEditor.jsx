@@ -4,6 +4,7 @@ import { getDefaultCalendarId } from '../../shared/calendarOrder.js';
 import { toDateKey } from '../lib/calendarUtils.js';
 import { getCalendarTheme } from '../lib/colors.js';
 import { insertTextAtCursor } from '../lib/insertAtCursor.js';
+import { cn } from '../lib/cn.js';
 import {
   appendEventLink,
   getEventLinks,
@@ -99,6 +100,7 @@ export default function EventEditor({
   const [tagIds, setTagIds] = useState([]);
   const [attachments, setAttachments] = useState([]);
   const [attachBusy, setAttachBusy] = useState(false);
+  const [completed, setCompleted] = useState(false);
   const titleInputRef = useRef(null);
   /** Re-seed the form only when the editor opens for a different event (or create). */
   const formSeedKeyRef = useRef(null);
@@ -143,6 +145,7 @@ export default function EventEditor({
       setMarkerShape(event.markerShape ?? null);
       setTagIds(normalizeTagIds(event.tagIds));
       setAttachments(Array.isArray(event.attachments) ? event.attachments : []);
+      setCompleted(Boolean(event.completed));
       return;
     }
 
@@ -161,6 +164,7 @@ export default function EventEditor({
     setCalendarId(getDefaultCalendarId(calendars, HOLIDAYS_KR_CALENDAR_ID));
     setMarkerShape(null);
     setAttachments([]);
+    setCompleted(false);
   }, [open, event, calendars, defaultDate]);
 
   useEffect(() => {
@@ -293,7 +297,7 @@ export default function EventEditor({
       calendarId,
       guests: event?.guests ?? [],
       color: event?.color ?? null,
-      completed: Boolean(event?.completed),
+      completed,
       markerShape,
       tagIds: normalizeTagIds(tagIds),
       sortOrder: typeof event?.sortOrder === 'number' && Number.isFinite(event.sortOrder)
@@ -341,6 +345,18 @@ export default function EventEditor({
 
         <div className="flex items-center gap-3 border-b border-gcal-border-light px-[18px] py-3.5">
           <div className="flex shrink-0 items-center gap-1">
+            <label
+              className="inline-flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded border border-transparent text-gcal-muted transition-colors hover:border-gcal-border hover:bg-gcal-surface-2"
+              title={completed ? '미완료로 표시' : '완료로 표시'}
+            >
+              <input
+                type="checkbox"
+                className="day-quick-edit-check h-4 w-4"
+                checked={completed}
+                onChange={(e) => setCompleted(e.target.checked)}
+                aria-label={completed ? '미완료로 표시' : '완료로 표시'}
+              />
+            </label>
             <EmojiPickerButton
               title="이모지 추가"
               buttonClassName="event-editor-toolbar-trigger event-editor-emoji-trigger"
@@ -367,7 +383,10 @@ export default function EventEditor({
           </div>
           <input
             ref={titleInputRef}
-            className="min-w-0 flex-1 border-0 bg-transparent text-[22px] text-gcal-heading outline-none placeholder:text-gcal-muted"
+            className={cn(
+              'min-w-0 flex-1 border-0 bg-transparent text-[22px] outline-none placeholder:text-gcal-muted',
+              completed ? 'text-gcal-muted line-through' : 'text-gcal-heading',
+            )}
             placeholder="일정 추가 및 시간 설정"
             value={title}
             onChange={(e) => setTitle(e.target.value)}

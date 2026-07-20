@@ -19,6 +19,7 @@ function ClearColorIcon({ className }) {
 /**
  * whiteboard4share 스타일 원형 팔레트 (날짜 칸 배경색).
  * 첫 칸: 무색(기본) — 선택 시 dayColor 제거.
+ * 프리셋 색상: 한 번 클릭하면 즉시 날짜 칸에 적용하고 팔레트를 닫음.
  * 마지막: 기타 색상 — 패널에서 고른 뒤 「적용」시에만 반영.
  */
 export default function DayColorPalette({
@@ -34,8 +35,9 @@ export default function DayColorPalette({
     value && !DAY_COLOR_PALETTE.some((c) => c.toLowerCase() === selected),
   );
 
-  const applyClear = () => {
-    onChange(null);
+  const applyAndClose = (color) => {
+    onChange(color);
+    onRequestClose?.();
   };
 
   return (
@@ -48,13 +50,9 @@ export default function DayColorPalette({
         title="기본(색 없음)"
         aria-label="기본 색상 (색 없음)"
         onClick={(e) => {
-          if (e.detail > 1) return;
-          applyClear();
-        }}
-        onDoubleClick={(e) => {
           e.preventDefault();
-          applyClear();
-          onRequestClose?.();
+          e.stopPropagation();
+          applyAndClose(null);
         }}
       >
         <ClearColorIcon className="day-color-clear-icon" />
@@ -72,13 +70,10 @@ export default function DayColorPalette({
             title={color}
             aria-label={`색상 ${color}`}
             onClick={(e) => {
-              if (e.detail > 1) return;
-              onChange(isActive ? null : color);
-            }}
-            onDoubleClick={(e) => {
               e.preventDefault();
-              onChange(color);
-              onRequestClose?.();
+              e.stopPropagation();
+              // Already selected: clear. Otherwise apply that color — one click is enough.
+              applyAndClose(isActive ? null : color);
             }}
           />
         );
