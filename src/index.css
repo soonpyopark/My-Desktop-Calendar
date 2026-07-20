@@ -384,11 +384,6 @@
     background-color: var(--event-accent, #039be5);
   }
 
-  .event-bar--start .event-bar-label,
-  .event-bar--single .event-bar-label {
-    @apply max-w-full;
-  }
-
   .event-bar--single .event-bar-accent,
   .event-bar--start .event-bar-accent {
     border-radius: 2px 0 0 2px;
@@ -407,9 +402,12 @@
     line-height: 1;
   }
 
-  /* Pin link/attach icons to the trailing edge of day-cell bars and day lists. */
+  /*
+   * Trailing link/attach icons stay visible; the label (title) shrinks with ellipsis.
+   * Do not put max-w-full on the label — that can claim the full bar width and clip icons.
+   */
   .event-bar-trailing {
-    @apply ml-auto inline-flex shrink-0 items-center;
+    @apply inline-flex shrink-0 items-center;
     gap: 2px;
     padding-right: 3px;
   }
@@ -435,9 +433,9 @@
   }
 
   .event-bar-label {
-    @apply flex min-h-0 min-w-0 flex-1 items-center;
+    @apply flex min-h-0 min-w-0 flex-1 items-center overflow-hidden;
     padding-left: 1ch;
-    padding-right: 4px;
+    padding-right: 2px;
   }
 
   .event-bar-label > .event-time + .event-day-index,
@@ -481,8 +479,9 @@
     @apply shrink-0 opacity-80;
   }
 
+  /* Title yields space to trailing icons; overflow becomes "…". */
   .event-title {
-    @apply min-w-0 truncate;
+    @apply min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap;
   }
 
   .event-bar:hover {

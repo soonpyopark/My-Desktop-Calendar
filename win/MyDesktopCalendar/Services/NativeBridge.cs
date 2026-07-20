@@ -1643,16 +1643,9 @@ internal sealed class NativeBridge
                 StartupRegistrationService.Apply(runAtStartup);
             }
 
-            var opacity = AppConstants.DefaultOpacity;
-            if (settings["widget"] is JsonObject widget
-                && widget["opacity"] is JsonValue opacityNode
-                && opacityNode.TryGetValue<double>(out var opacityValue))
-            {
-                opacity = opacityValue;
-            }
-
+            var opacity = ReadWidgetOpacity(settings);
             _embed.SetOpacity(opacity);
-            ApplyMainWindowLayeredAlpha(opacity);
+            ApplyMainWindowOpacity(opacity);
         }
         catch
         {
@@ -1660,36 +1653,78 @@ internal sealed class NativeBridge
         }
     }
 
+    private static double ReadWidgetOpacity(JsonObject settings)
+    {
+        if (settings["widget"] is not JsonObject widget
+            || widget["opacity"] is not JsonValue value)
+        {
+            return AppConstants.DefaultOpacity;
+        }
+
+        if (value.TryGetValue<double>(out var d))
+        {
+            return DesktopEmbedService.NormalizeOpacity(d);
+        }
+
+        if (value.TryGetValue<int>(out var i))
+        {
+            return DesktopEmbedService.NormalizeOpacity(i);
+        }
+
+        if (value.TryGetValue<long>(out var l))
+        {
+            return DesktopEmbedService.NormalizeOpacity(l);
+        }
+
+        if (value.TryGetValue<string>(out var s)
+            && double.TryParse(s, System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture, out var parsed))
+        {
+            return DesktopEmbedService.NormalizeOpacity(parsed);
+        }
+
+        return AppConstants.DefaultOpacity;
+    }
+
     /// <summary>
-    /// Main (App) window whole-window alpha via Win32 layered attributes (LWA_ALPHA).
+    /// Main (App) window opacity: WPF <see cref="Window.Opacity"/> + top-level LWA_ALPHA
+    /// (covers WebView2 child HWNDs when the App window is top-level).
     /// </summary>
-    private void ApplyMainWindowLayeredAlpha(double opacity)
+    private void ApplyMainWindowOpacity(double opacity)
     {
         try
         {
+            var clamped = DesktopEmbedService.NormalizeOpacity(opacity);
+            var alpha = (byte)Math.Clamp((int)Math.Round(clamped * 255.0), 13, 255);
+
+            void ApplyWpf()
+            {
+                try
+                {
+                    _window.Opacity = clamped;
+                }
+                catch
+                {
+                    /* disposed */
+                }
+            }
+
+            if (_window.Dispatcher.CheckAccess())
+            {
+                ApplyWpf();
+            }
+            else
+            {
+                _ = _window.Dispatcher.BeginInvoke(ApplyWpf);
+            }
+
             var hwnd = new WindowInteropHelper(_window).Handle;
             if (hwnd == IntPtr.Zero || !Win32.IsWindow(hwnd))
             {
                 return;
             }
 
-            var clamped = Math.Clamp(opacity, AppConstants.MinOpacity, 1.0);
-            clamped = Math.Round(clamped * 20.0) / 20.0;
-            clamped = Math.Clamp(clamped, AppConstants.MinOpacity, 1.0);
-            var alpha = (byte)Math.Clamp((int)Math.Round(clamped * 255.0), 13, 255);
-
             var ex = Win32.GetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE).ToInt64();
-            if (alpha >= 255)
-            {
-                if ((ex & Win32.WS_EX_LAYERED) != 0)
-                {
-                    // Keep layered at full opacity so later slider moves don't fight WPF chrome.
-                    _ = Win32.SetLayeredWindowAttributes(hwnd, 0, 255, Win32.LWA_ALPHA);
-                }
-
-                return;
-            }
-
             if ((ex & Win32.WS_EX_LAYERED) == 0)
             {
                 Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE, new IntPtr(ex | Win32.WS_EX_LAYERED));

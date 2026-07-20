@@ -108,15 +108,21 @@ internal sealed class DesktopEmbedService
 
     public void SetOpacity(double opacity)
     {
-        var clamped = Math.Clamp(opacity, AppConstants.MinOpacity, 1.0);
-        // Snap to 5% steps so UI slider and layered alpha stay aligned.
-        clamped = Math.Round(clamped * 20.0) / 20.0;
-        clamped = Math.Clamp(clamped, AppConstants.MinOpacity, 1.0);
+        var clamped = NormalizeOpacity(opacity);
         _alpha = (byte)Math.Clamp((int)Math.Round(clamped * 255.0), 13, 255);
+        ApplyWpfHostOpacity(clamped);
         ApplyAlphaTree();
     }
 
     public double GetOpacity() => _alpha / 255.0;
+
+    /// <summary>Snap to 5% steps in [MinOpacity, 1].</summary>
+    public static double NormalizeOpacity(double opacity)
+    {
+        var clamped = Math.Clamp(opacity, AppConstants.MinOpacity, 1.0);
+        clamped = Math.Round(clamped * 20.0) / 20.0;
+        return Math.Clamp(clamped, AppConstants.MinOpacity, 1.0);
+    }
 
     public Bounds GetCurrentBounds()
     {
@@ -758,10 +764,24 @@ internal sealed class DesktopEmbedService
     }
 
     /// <summary>
-    /// Apply <c>WS_EX_LAYERED</c> + <see cref="_alpha"/> via SetLayeredWindowAttributes (LWA_ALPHA).
-    /// Fully opaque hosts under the shell drop layered style instead — see <see cref="ApplyAlphaTree"/>.
+    /// Apply <c>WS_EX_LAYERED</c> + alpha via SetLayeredWindowAttributes (LWA_ALPHA).
+    /// Top-level: root only (children are blended with the parent). Shell-parented child:
+    /// walk WebView2 descendant HWNDs — alpha on the WPF host alone leaves Chromium opaque.
     /// </summary>
     private void EnsureLayeredAlpha(IntPtr hwnd)
+    {
+        var shellParented = _embedParent != IntPtr.Zero || IsShellParented;
+        if (shellParented)
+        {
+            ApplyLayeredAlphaRecursive(hwnd, _alpha);
+        }
+        else
+        {
+            ApplyLayeredAlphaToWindow(hwnd, _alpha);
+        }
+    }
+
+    private static void ApplyLayeredAlphaToWindow(IntPtr hwnd, byte alpha)
     {
         if (hwnd == IntPtr.Zero || !Win32.IsWindow(hwnd))
         {
@@ -774,7 +794,22 @@ internal sealed class DesktopEmbedService
             Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE, new IntPtr(ex | Win32.WS_EX_LAYERED));
         }
 
-        _ = Win32.SetLayeredWindowAttributes(hwnd, 0, _alpha, Win32.LWA_ALPHA);
+        _ = Win32.SetLayeredWindowAttributes(hwnd, 0, alpha, Win32.LWA_ALPHA);
+    }
+
+    private static void ApplyLayeredAlphaRecursive(IntPtr hwnd, byte alpha)
+    {
+        ApplyLayeredAlphaToWindow(hwnd, alpha);
+        if (hwnd == IntPtr.Zero || !Win32.IsWindow(hwnd))
+        {
+            return;
+        }
+
+        _ = Win32.EnumChildWindows(hwnd, (child, _) =>
+        {
+            ApplyLayeredAlphaRecursive(child, alpha);
+            return true;
+        }, IntPtr.Zero);
     }
 
     /// <summary>
@@ -784,10 +819,21 @@ internal sealed class DesktopEmbedService
     /// </summary>
     private static void ClearLayeredStyle(IntPtr hwnd)
     {
+        ClearLayeredStyleRecursive(hwnd);
+    }
+
+    private static void ClearLayeredStyleRecursive(IntPtr hwnd)
+    {
         if (hwnd == IntPtr.Zero || !Win32.IsWindow(hwnd))
         {
             return;
         }
+
+        _ = Win32.EnumChildWindows(hwnd, (child, _) =>
+        {
+            ClearLayeredStyleRecursive(child);
+            return true;
+        }, IntPtr.Zero);
 
         var ex = Win32.GetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE).ToInt64();
         if ((ex & Win32.WS_EX_LAYERED) == 0)
@@ -816,7 +862,7 @@ internal sealed class DesktopEmbedService
         // Never DwmExtendFrameIntoClientArea on DesktopHost (washes the shell).
         // Fully opaque + shell-parented: drop WS_EX_LAYERED — opaque layered under
         // DefView still fogs wallpaper/icons on a subset of GPU/driver builds.
-        // Translucent: keep layered alpha so the calendar can see through wallpaper.
+        // Translucent: layered alpha on Host + WebView2 child HWNDs.
         var shellParented = _embedParent != IntPtr.Zero || IsShellParented;
         if (shellParented && _alpha >= 255)
         {
@@ -825,6 +871,36 @@ internal sealed class DesktopEmbedService
         else
         {
             EnsureLayeredAlpha(_hwnd);
+        }
+    }
+
+    private void ApplyWpfHostOpacity(double opacity)
+    {
+        var host = _hostWindow;
+        if (host is null)
+        {
+            return;
+        }
+
+        void Apply()
+        {
+            try
+            {
+                host.Opacity = opacity;
+            }
+            catch
+            {
+                /* disposed */
+            }
+        }
+
+        if (host.Dispatcher.CheckAccess())
+        {
+            Apply();
+        }
+        else
+        {
+            _ = host.Dispatcher.BeginInvoke(Apply);
         }
     }
 
