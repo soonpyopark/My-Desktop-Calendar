@@ -3,21 +3,18 @@ using System.Text.Json.Nodes;
 namespace MyDesktopCalendar.Services;
 
 /// <summary>
-/// Preflight checks before entering wallpaper/desktop embed mode.
-/// Missing items are surfaced in header modal / tray MessageBox — not a guarantee embed will succeed.
+/// Preflight checks before desktop (locked) mode. Shell/Progman embed checks removed —
+/// desktop mode is a locked top-level window, not a wallpaper embed.
 /// </summary>
 internal static class DesktopReadiness
 {
-    /// <summary>Windows 10 1809 (RS5) — minimum practical shell for WorkerW/DefView embed paths.</summary>
+    /// <summary>Windows 10 1809 — practical floor for WebView2 + WPF shell.</summary>
     private const int MinWindowsBuild = 17763;
 
     public static JsonObject Evaluate(DesktopEmbedService embed)
     {
         var caps = embed.GetCapabilitySnapshot();
         var build = caps["build"]?.GetValue<int>() ?? 0;
-        var progman = caps["progman"]?.GetValue<bool>() == true;
-        var workerw = caps["workerw"]?.GetValue<bool>() == true;
-        var defView = caps["defView"]?.GetValue<bool>() == true;
         var webView2 = WebView2RuntimeGuide.IsRuntimeAvailable();
         var webView2Version = WebView2RuntimeGuide.TryGetRuntimeVersion();
 
@@ -37,20 +34,6 @@ internal static class DesktopReadiness
                 webView2
                     ? (string.IsNullOrWhiteSpace(webView2Version) ? "설치됨" : webView2Version)
                     : "Microsoft Edge WebView2 Runtime이 없습니다"),
-            Check(
-                "progman",
-                progman,
-                "바탕화면 셸 (Progman)",
-                progman
-                    ? "확인됨"
-                    : "Windows 바탕화면 셸(Progman)을 찾지 못했습니다"),
-            Check(
-                "shellHost",
-                workerw || defView,
-                "셸 호스트 (WorkerW / DefView)",
-                workerw || defView
-                    ? (workerw && defView ? "WorkerW + DefView" : workerw ? "WorkerW" : "DefView")
-                    : "바탕화면 임베드용 셸 호스트(WorkerW/DefView)를 찾지 못했습니다"),
         };
 
         var ready = true;
@@ -70,7 +53,6 @@ internal static class DesktopReadiness
         };
     }
 
-    /// <summary>Korean multi-line summary of failed checks for MessageBox / alert.</summary>
     public static string FormatMissingMessage(JsonObject readiness)
     {
         var lines = new List<string>

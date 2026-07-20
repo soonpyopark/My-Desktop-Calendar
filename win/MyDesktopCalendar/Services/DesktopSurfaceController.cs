@@ -5,11 +5,9 @@ using MyDesktopCalendar.Native;
 namespace MyDesktopCalendar.Services;
 
 /// <summary>
-/// Single-HWND surface switcher: <see cref="MainWindow"/> is either shell-parented
-/// (desktop mode) or top-level (window mode). One WebView2 stays attached for both.
-/// Mode switches toggle top-level <c>WS_POPUP</c> desktop vs window styles
-/// (no <c>SetParent</c>), covered by <see cref="DesktopTransitionCover"/>.
-/// Overlays (settings/search/quick-edit) stay in-place — no second surface.
+/// Single-HWND mode switcher. Desktop mode = locked window (no move/resize/chrome
+/// buttons). Window mode = movable/resizable with title-bar controls. No wallpaper
+/// embedding, SetParent, or desktop z-order.
 /// </summary>
 internal sealed class DesktopSurfaceController
 {
@@ -26,10 +24,6 @@ internal sealed class DesktopSurfaceController
         _bridge = bridge;
     }
 
-    /// <summary>
-    /// MainWindow DWM-cloaks at OnSourceInitialized; sync the flag so boot embed
-    /// does not assume the window is visible.
-    /// </summary>
     public void MarkAppCloakedAtBoot()
     {
         _appCloaked = true;
@@ -37,7 +31,6 @@ internal sealed class DesktopSurfaceController
 
     public DesktopEmbedService Embed => _embed;
 
-    /// <summary>Single surface HWND (MainWindow).</summary>
     public IntPtr HostHwnd => GetAppHwnd();
 
     public bool IsDesktopSurfaceActive => _embed.IsEmbedded;
@@ -45,8 +38,7 @@ internal sealed class DesktopSurfaceController
     public bool IsShellParented => _embed.IsShellParented;
 
     /// <param name="shouldCloakApp">
-    /// Legacy boot-suspend hook: when false, stay top-level (login wall) instead of
-    /// embedding. Null means prefer desktop embed.
+    /// When false (e.g. login wall), stay unlocked/visible instead of locking.
     /// </param>
     public async Task EnterDesktopModeAsync(
         DesktopEmbedService.Bounds? bounds = null,
@@ -57,52 +49,32 @@ internal sealed class DesktopSurfaceController
 
         if (!preferDesktop)
         {
-            // Boot suspend (e.g. login): keep top-level and visible.
             await EnsureUncloakedTopLevelAsync(Normalize(bounds ?? CaptureLiveBounds()), bringToFront: true);
             return;
         }
 
-        if (_embed.IsShellParented && _embed.IsSurfaceVisible)
-        {
-            return;
-        }
-
+        // Always force show/uncloak — Win+D can leave the HWND hidden/minimized/cloaked
+        // while our IsSurfaceVisible flag is still true (early-return used to skip restore).
         EnsureAppShown();
+        SetAppCloak(false, force: true);
 
-        // Uncloak before cover/capture so PrintWindow can see pixels if needed.
-        SetAppCloak(false);
-        // No recalculation: whatever footprint the HWND already has is what the cover
-        // snapshots and what stays applied — a toggle is style/z-order only.
         var current = Normalize(bounds ?? CaptureLiveBounds());
-
-        var covered = DesktopTransitionCover.TryShow(_app, GetAppHwnd(), current);
-        // Hide the real HWND while desktop popup styles/z-order apply — cover stays visible.
-        SetAppCloak(true);
-        try
+        if (_embed.IsShellParented)
         {
-            if (_embed.IsShellParented)
-            {
-                _embed.ShowSurface(current);
-            }
-            else
-            {
-                _embed.Embed(current);
-            }
+            _embed.ShowSurface(current);
         }
-        finally
+        else
         {
-            SetAppCloak(false);
-            if (covered)
-            {
-                DesktopTransitionCover.HideAfterComposition(_app);
-            }
+            _embed.Embed(current);
         }
 
+        ApplyHostLock(true);
+        _embed.EnsureVisibleOnDesktop();
         _appCloaked = false;
         SetAppWebViewActive(true);
+        await Task.CompletedTask;
     }
 
-    /// <summary>Permanent window mode — unparent MainWindow and restore top-level chrome.</summary>
     public Task EnterWindowModeAsync(bool bringToFront = true) => EnterWindowModeCoreAsync(bringToFront);
 
     public void EnterWindowMode(bool bringToFront = true) =>
@@ -116,30 +88,15 @@ internal sealed class DesktopSurfaceController
 
         if (_embed.IsShellParented)
         {
-            // No recalculation: the HWND footprint is not touched by this toggle,
-            // only styles/z-order — a border simply appears as it comes to the front.
             var current = Normalize(CaptureLiveBounds());
-            var covered = DesktopTransitionCover.TryShow(_app, GetAppHwnd(), current);
-            // Cloak while switching popup styles so intermediate frames stay hidden.
-            SetAppCloak(true);
-            try
-            {
-                _embed.ReleaseShellHost(current);
-            }
-            finally
-            {
-                SetAppCloak(false);
-                if (covered)
-                {
-                    DesktopTransitionCover.HideAfterComposition(_app);
-                }
-            }
+            _embed.ReleaseShellHost(current);
         }
         else
         {
             Win32.ShowWindow(GetAppHwnd(), Win32.SW_SHOW);
         }
 
+        ApplyHostLock(false);
         SetAppWebViewActive(true);
         if (bringToFront)
         {
@@ -154,11 +111,9 @@ internal sealed class DesktopSurfaceController
         await Task.CompletedTask;
     }
 
-    /// <summary>Current on-screen HWND rect; falls back to embed service measurement.</summary>
     private DesktopEmbedService.Bounds CaptureLiveBounds()
         => CaptureAppPhysicalBounds() ?? _embed.GetCurrentBounds();
 
-    /// <summary>Overlays stay in-place on the single surface — no mode switch.</summary>
     public Task SuspendDesktopForUiAsync() => Task.CompletedTask;
 
     public void SuspendDesktopForUi()
@@ -166,13 +121,13 @@ internal sealed class DesktopSurfaceController
         /* in-place overlays */
     }
 
-    /// <summary>No-op resume; desktop enter re-embeds if needed.</summary>
     public Task ResumeDesktopAfterUiAsync()
     {
         if (_embed.IsShellParented)
         {
             var target = Normalize(_embed.LockedBounds ?? _embed.GetCurrentBounds());
             _embed.ShowSurface(target);
+            ApplyHostLock(true);
             SetAppCloak(false);
             SetAppWebViewActive(true);
             return Task.CompletedTask;
@@ -187,6 +142,14 @@ internal sealed class DesktopSurfaceController
     {
         EnsureAttached();
         return Task.CompletedTask;
+    }
+
+    private void ApplyHostLock(bool locked)
+    {
+        if (_app is MainWindow main)
+        {
+            main.ApplyWindowLockMode(locked);
+        }
     }
 
     private void EnsureAttached()
@@ -225,6 +188,7 @@ internal sealed class DesktopSurfaceController
             PlaceAppWindow(target);
         }
 
+        ApplyHostLock(false);
         SetAppCloak(false);
         SetAppWebViewActive(true);
         if (bringToFront)
@@ -253,9 +217,9 @@ internal sealed class DesktopSurfaceController
         }
     }
 
-    private void SetAppCloak(bool cloak)
+    private void SetAppCloak(bool cloak, bool force = false)
     {
-        if (_appCloaked == cloak)
+        if (!force && _appCloaked == cloak)
         {
             return;
         }
@@ -279,7 +243,6 @@ internal sealed class DesktopSurfaceController
             return;
         }
 
-        // Skip no-op moves — mode toggles must not churn size when already correct.
         if (Win32.GetWindowRect(hwnd, out var rect))
         {
             var same =
@@ -302,7 +265,6 @@ internal sealed class DesktopSurfaceController
             }
         }
 
-        // Win32 first (physical px), then sync WPF DIP.
         Win32.SetWindowPos(
             hwnd,
             Win32.HWND_TOP,

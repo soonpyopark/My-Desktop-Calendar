@@ -32,6 +32,7 @@ internal static class Win32
     public const uint SWP_NOACTIVATE = 0x0010;
     public const uint SWP_FRAMECHANGED = 0x0020;
     public const uint SWP_SHOWWINDOW = 0x0040;
+    public const uint SWP_HIDEWINDOW = 0x0080;
     public const uint SWP_NOREDRAW = 0x0008;
 
     public const int SW_HIDE = 0;
@@ -40,6 +41,7 @@ internal static class Win32
     public const int SW_RESTORE = 9;
     public const int SW_MAXIMIZE = 3;
     public const int SW_MINIMIZE = 6;
+    public const int SW_FORCEMINIMIZE = 11;
 
     public static readonly IntPtr HWND_TOP = IntPtr.Zero;
     public static readonly IntPtr HWND_BOTTOM = new(1);
@@ -72,6 +74,9 @@ internal static class Win32
     /// </summary>
     public const int DWMWA_CLOAK = 13;
 
+    /// <summary>Read-only: non-zero when the window is currently cloaked by DWM/shell.</summary>
+    public const int DWMWA_CLOAKED = 14;
+
     public const uint PW_CLIENTONLY = 0x1;
     public const uint PW_RENDERFULLCONTENT = 0x2;
 
@@ -90,6 +95,24 @@ internal static class Win32
         public int X;
         public int Y;
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct WINDOWPOS
+    {
+        public IntPtr hwnd;
+        public IntPtr hwndInsertAfter;
+        public int x;
+        public int y;
+        public int cx;
+        public int cy;
+        public uint flags;
+    }
+
+    public const int WM_WINDOWPOSCHANGING = 0x0046;
+    public const int WM_ACTIVATE = 0x0006;
+    public const int WM_SHOWWINDOW = 0x0018;
+    public const int WM_SIZE = 0x0005;
+    public const int SIZE_MINIMIZED = 1;
 
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -137,6 +160,9 @@ internal static class Win32
 
     [DllImport("user32.dll")]
     public static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsIconic(IntPtr hWnd);
 
     [DllImport("user32.dll")]
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
@@ -241,6 +267,9 @@ internal static class Win32
 
     [DllImport("dwmapi.dll")]
     public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out int attrValue, int attrSize);
 
     [DllImport("dwmapi.dll")]
     public static extern int DwmExtendFrameIntoClientArea(IntPtr hWnd, ref MARGINS pMarInset);

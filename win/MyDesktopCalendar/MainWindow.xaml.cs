@@ -34,6 +34,7 @@ public partial class MainWindow : Window
     private bool _inSizeMove;
     private bool _resizeContentFrozen;
     private bool _webViewSizePinned;
+    private bool _windowLocked;
     private System.Windows.Threading.DispatcherTimer? _displayChangeDebounce;
 
     public MainWindow()
@@ -92,6 +93,19 @@ public partial class MainWindow : Window
             }
 
             _bridge.ApplyFrameThemeFromSettings();
+            // Desktop mode: clicks may activate us — push back under other windows
+            // unless quick-edit (etc.) has temporarily raised the surface.
+            if (_windowLocked && !_embed.IsForegroundOverride)
+            {
+                _embed.SendToBottom();
+                return;
+            }
+
+            if (_windowLocked)
+            {
+                return;
+            }
+
             // Recover from rare WebView2 blank surfaces after move/minimize on older runtimes.
             if (!_embed.IsEmbedded && !_resizeContentFrozen)
             {
@@ -108,10 +122,8 @@ public partial class MainWindow : Window
         LocationChanged += OnWindowLocationChanged;
         SizeChanged += OnWindowSizeChanged;
 
-        // Monitor sleep/wake, cable reconnect, resolution/DPI, or arrangement changes commonly
-        // make Explorer recreate Progman/WorkerW/DefView — a shell-parented MainWindow
-        // has no way to hear about that on its own, so without this it can end up parented
-        // to a now-dead handle or parked over screen space that no longer exists.
+        // Monitor sleep/wake, cable reconnect, resolution/DPI, or arrangement changes can
+        // leave locked bounds over screen space that no longer exists — reclamp on change.
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
     }
 
@@ -171,19 +183,16 @@ public partial class MainWindow : Window
         try
         {
             RememberWindowBoundsIfNeeded();
-            var bounds = _embed.LockedBounds ?? CapturePhysicalBounds();
-            // Temporary UI unlock still means desktop is preferred; search permanent unlock
-            // clears suspend and PersistLaunchMode("window") already ran.
-            var mode = (_surfaces.IsDesktopSurfaceActive || _bridge.IsEmbedSuspended)
-                ? "desktop"
-                : "window";
-
+            var bounds = DesktopEmbedService.SnapBoundsDownTo5(
+                _embed.LockedBounds ?? CapturePhysicalBounds());
+            // Always reboot into desktop (locked) mode; window mode is in-session only.
+            // Persist the user's last size/position for the next launch.
             _store.PatchSettings(new JsonObject
             {
                 ["widget"] = new JsonObject
                 {
-                    ["launchMode"] = mode,
-                    ["enabled"] = mode == "desktop",
+                    ["launchMode"] = "desktop",
+                    ["enabled"] = true,
                     ["bounds"] = new JsonObject
                     {
                         ["x"] = bounds.X,
@@ -202,21 +211,25 @@ public partial class MainWindow : Window
 
     private void RestoreWindowSession()
     {
-        var settings = _store.ReadStore()["settings"]?.AsObject();
-        var widget = settings?["widget"]?.AsObject();
-        if (widget?["bounds"]?.AsObject() is not { } boundsNode
-            || boundsNode["width"] is null)
-        {
-            return;
-        }
-
         try
         {
-            var x = (int)Math.Round(ReadJsonNumber(boundsNode, "x", 0));
-            var y = (int)Math.Round(ReadJsonNumber(boundsNode, "y", 0));
-            var w = Math.Max(200, (int)Math.Round(ReadJsonNumber(boundsNode, "width", Width)));
-            var h = Math.Max(150, (int)Math.Round(ReadJsonNumber(boundsNode, "height", Height)));
-            var physical = ClampBoundsToVirtualScreen(new DesktopEmbedService.Bounds(x, y, w, h));
+            DesktopEmbedService.Bounds physical;
+            var settings = _store.ReadStore()["settings"]?.AsObject();
+            var widget = settings?["widget"]?.AsObject();
+            if (widget?["bounds"]?.AsObject() is { } boundsNode && boundsNode["width"] is not null)
+            {
+                var x = (int)Math.Round(ReadJsonNumber(boundsNode, "x", 0));
+                var y = (int)Math.Round(ReadJsonNumber(boundsNode, "y", 0));
+                var w = Math.Max(200, (int)Math.Round(ReadJsonNumber(boundsNode, "width", Width)));
+                var h = Math.Max(150, (int)Math.Round(ReadJsonNumber(boundsNode, "height", Height)));
+                physical = ClampBoundsToVirtualScreen(
+                    DesktopEmbedService.SnapBoundsDownTo5(new DesktopEmbedService.Bounds(x, y, w, h)));
+            }
+            else
+            {
+                // First install / missing bounds → primary-monitor factory default.
+                physical = DesktopEmbedService.GetDefaultBounds();
+            }
 
             // CenterScreen would overwrite Left/Top after SourceInitialized — lock Manual.
             WindowStartupLocation = WindowStartupLocation.Manual;
@@ -407,10 +420,162 @@ public partial class MainWindow : Window
     /// </summary>
     internal void SetAppWebViewActive(bool active) => WebViewSurfaceMemory.SetActive(WebView, active);
 
+    /// <summary>
+    /// Desktop mode = locked window (no move/resize) + always-on-bottom.
+    /// Window mode unlocks chrome. TitleBar hides min/max/close while <c>embedded</c>.
+    /// </summary>
+    internal void ApplyWindowLockMode(bool locked)
+    {
+        _windowLocked = locked;
+        try
+        {
+            ResizeMode = locked ? ResizeMode.NoResize : ResizeMode.CanResize;
+            if (locked && WindowState != WindowState.Normal)
+            {
+                WindowState = WindowState.Normal;
+            }
+        }
+        catch
+        {
+            /* ignore */
+        }
+
+        _embed.EnableAlwaysOnBottom(locked);
+    }
+
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
         const int wmEnterSizeMove = 0x0231;
         const int wmExitSizeMove = 0x0232;
+        const int wmSysCommand = 0x0112;
+        const int wmNcLButtonDown = 0x00A1;
+        const int scMove = 0xF010;
+        const int scSize = 0xF000;
+        const int scMinimize = 0xF020;
+        const int scMaximize = 0xF030;
+        const int scClose = 0xF060;
+        const int scRestore = 0xF120;
+        const int htCaption = 2;
+        const int htLeft = 10;
+        const int htBottomRight = 17;
+
+        if (_windowLocked)
+        {
+            // Keep under other apps (unless quick-edit raised us). Refuse Win+D hide.
+            if (msg == Win32.WM_WINDOWPOSCHANGING && lParam != IntPtr.Zero)
+            {
+                try
+                {
+                    var pos = System.Runtime.InteropServices.Marshal.PtrToStructure<Win32.WINDOWPOS>(lParam);
+                    var changed = false;
+                    if ((pos.flags & Win32.SWP_HIDEWINDOW) != 0)
+                    {
+                        pos.flags = (pos.flags & ~Win32.SWP_HIDEWINDOW) | Win32.SWP_SHOWWINDOW;
+                        changed = true;
+                    }
+
+                    // Block raises to top. Do NOT force HWND_BOTTOM here — that parks under
+                    // Win+D's show-desktop WorkerW and the calendar vanishes. Desktop-layer
+                    // placement is owned by DesktopEmbedService.SendToBottom().
+                    if (!_embed.IsForegroundOverride && (pos.flags & Win32.SWP_NOZORDER) == 0)
+                    {
+                        var after = pos.hwndInsertAfter;
+                        if (after == Win32.HWND_TOP || after == Win32.HWND_TOPMOST)
+                        {
+                            pos.flags |= Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE;
+                            changed = true;
+                        }
+                    }
+
+                    if (changed)
+                    {
+                        System.Runtime.InteropServices.Marshal.StructureToPtr(pos, lParam, false);
+                    }
+                }
+                catch
+                {
+                    /* ignore */
+                }
+            }
+
+            // ShowWindow(SW_HIDE / FORCEMINIMIZE) path used by Win+D on some builds.
+            if (msg == Win32.WM_SHOWWINDOW && wParam == IntPtr.Zero)
+            {
+                handled = true;
+                _ = Dispatcher.BeginInvoke(() =>
+                {
+                    if (_windowLocked)
+                    {
+                        _embed.EnsureVisibleOnDesktop();
+                    }
+                });
+                return IntPtr.Zero;
+            }
+
+            if (msg == Win32.WM_SIZE && wParam.ToInt32() == Win32.SIZE_MINIMIZED)
+            {
+                handled = true;
+                _ = Dispatcher.BeginInvoke(() =>
+                {
+                    if (!_windowLocked)
+                    {
+                        return;
+                    }
+
+                    try
+                    {
+                        if (WindowState != WindowState.Normal)
+                        {
+                            WindowState = WindowState.Normal;
+                        }
+                    }
+                    catch
+                    {
+                        /* ignore */
+                    }
+
+                    _embed.EnsureVisibleOnDesktop();
+                });
+                return IntPtr.Zero;
+            }
+
+            if (msg == Win32.WM_ACTIVATE)
+            {
+                _ = Dispatcher.BeginInvoke(() =>
+                {
+                    if (_windowLocked && !_embed.IsForegroundOverride)
+                    {
+                        _embed.SendToBottom();
+                    }
+                });
+            }
+
+            if (msg == wmSysCommand)
+            {
+                var cmd = wParam.ToInt32() & 0xFFF0;
+                if (cmd is scMove or scSize or scMinimize or scMaximize or scClose or scRestore)
+                {
+                    handled = true;
+                    return IntPtr.Zero;
+                }
+            }
+
+            if (msg == wmNcLButtonDown)
+            {
+                var hit = wParam.ToInt32();
+                if (hit == htCaption || (hit >= htLeft && hit <= htBottomRight))
+                {
+                    handled = true;
+                    return IntPtr.Zero;
+                }
+            }
+
+            if (msg == wmEnterSizeMove)
+            {
+                handled = true;
+                return IntPtr.Zero;
+            }
+        }
 
         if (msg == wmEnterSizeMove)
         {
@@ -476,9 +641,8 @@ public partial class MainWindow : Window
     private void OnSourceInitialized(object? sender, EventArgs e)
     {
         _hwnd = new WindowInteropHelper(this).Handle;
-        // Cloak before WPF ever gets a chance to actually paint this HWND — the very
-        // first pixels the user sees should be the embedded desktop surface (or a real
-        // window, only if embedding later fails), never a boot-splash/normal-window flash.
+        // Cloak before first paint so boot does not flash unlocked chrome, then enter
+        // locked desktop mode (or window mode if that fails).
         CloakAppWindowAtBoot(_hwnd);
         _surfaces.MarkAppCloakedAtBoot();
         ApplyNativeWindowIcons(_hwnd);
@@ -487,7 +651,7 @@ public partial class MainWindow : Window
         _hwndSource = HwndSource.FromHwnd(_hwnd);
         _hwndSource?.AddHook(WndProc);
         _bridge.ApplyFrameThemeFromSettings();
-        // HWND exists now — apply persisted main-window layered alpha (and Host _alpha).
+        // HWND exists now — apply startup registration + force opaque chrome.
         _bridge.ApplyShellSettingsFromStore();
 
         RestoreWindowSession();
@@ -521,18 +685,15 @@ public partial class MainWindow : Window
         await InitWebViewAsync();
         _bridge.ApplyFrameThemeFromSettings();
 
-        // Desktop mode is always the launch default — every app start (manual launch or
-        // Windows-startup auto-run) embeds into the desktop, regardless of whichever mode
-        // was last persisted. 창모드 is only a manual, in-session tool for resizing/repositioning;
-        // it is never the mode the app boots back into.
-        // Defer first desktop surface until UI paints once.
+        // Desktop (locked) mode is the launch default. Window mode is a manual in-session
+        // tool for move/resize; it is never restored as the boot mode.
         _ = Dispatcher.BeginInvoke(async () =>
         {
             await Task.Delay(400);
             try
             {
                 // If the React login wall already opened and claimed suspend, stay
-                // top-level until the dialog closes (shouldCloakApp / preferDesktop).
+                // unlocked until the dialog closes (shouldCloakApp / preferDesktop).
                 await _surfaces.EnterDesktopModeAsync(
                     _embed.LockedBounds ?? CapturePhysicalBounds(),
                     shouldCloakApp: () => !_bridge.IsEmbedSuspended);
@@ -540,11 +701,11 @@ public partial class MainWindow : Window
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"바탕화면 임베드 실패: {ex.Message}", AppConstants.AppTitle);
+                MessageBox.Show($"바탕화면 모드 전환 실패: {ex.Message}", AppConstants.AppTitle);
                 try
                 {
-                    // Embedding failed at boot — fall back to a real window instead of
-                    // leaving AppWindow cloaked (invisible) forever.
+                    // Lock failed at boot — fall back to a real window instead of
+                    // leaving the HWND cloaked (invisible) forever.
                     _surfaces.EnterWindowMode();
                 }
                 catch
@@ -1194,6 +1355,7 @@ public partial class MainWindow : Window
 
             try
             {
+                var snapped = DesktopEmbedService.SnapBoundsDownTo5(bounds);
                 _store.PatchSettings(new JsonObject
                 {
                     ["widget"] = new JsonObject
@@ -1202,10 +1364,10 @@ public partial class MainWindow : Window
                         ["enabled"] = true,
                         ["bounds"] = new JsonObject
                         {
-                            ["x"] = bounds.X,
-                            ["y"] = bounds.Y,
-                            ["width"] = bounds.Width,
-                            ["height"] = bounds.Height,
+                            ["x"] = snapped.X,
+                            ["y"] = snapped.Y,
+                            ["width"] = snapped.Width,
+                            ["height"] = snapped.Height,
                         },
                     },
                 });
@@ -1221,7 +1383,7 @@ public partial class MainWindow : Window
             if (!_embed.IsEmbedded)
             {
                 MessageBox.Show(
-                    "바탕화면 임베드에 실패했습니다.",
+                    "바탕화면 모드 전환에 실패했습니다.",
                     AppConstants.AppTitle);
             }
         }
@@ -1239,7 +1401,8 @@ public partial class MainWindow : Window
 
             try
             {
-                var bounds = _embed.LockedBounds ?? CapturePhysicalBounds();
+                var bounds = DesktopEmbedService.SnapBoundsDownTo5(
+                    _embed.LockedBounds ?? CapturePhysicalBounds());
                 _store.PatchSettings(new JsonObject
                 {
                     ["widget"] = new JsonObject
@@ -1271,7 +1434,25 @@ public partial class MainWindow : Window
 
     private void OnStateChanged(object? sender, EventArgs e)
     {
-        // no-op — keep footprint stable
+        if (!_windowLocked)
+        {
+            return;
+        }
+
+        // Win+D / minimize-all must not tuck the desktop widget away.
+        if (WindowState != WindowState.Normal)
+        {
+            try
+            {
+                WindowState = WindowState.Normal;
+            }
+            catch
+            {
+                /* ignore */
+            }
+        }
+
+        _embed.EnsureVisibleOnDesktop();
     }
 
     /// <summary>

@@ -40,9 +40,6 @@
       if (data.type === 'widget-status' && data.status) {
         dispatchWidgetStatus(data.status);
       }
-      if (data.type === 'shell-opacity' && data.opacity != null) {
-        window.dispatchEvent(new CustomEvent('mycalendar:shellOpacity', { detail: { opacity: data.opacity } }));
-      }
       if (data.type === 'server-mode-changed') {
         window.dispatchEvent(new CustomEvent('mycalendar:serverModeChanged', { detail: data }));
       }
@@ -408,6 +405,22 @@
     postToShell('mycalendar:window-close');
   }
 
+  /** Desktop mode: raise above other windows for quick-edit / day double-click. */
+  function bringWindowToFront() {
+    if (isNativeHost()) {
+      return api('POST', '/api/window/bring-to-front');
+    }
+    return Promise.resolve({ ok: true });
+  }
+
+  /** Desktop mode: return to always-on-bottom after quick-edit closes. */
+  function releaseWindowForeground() {
+    if (isNativeHost()) {
+      return api('POST', '/api/window/release-foreground');
+    }
+    return Promise.resolve({ ok: true });
+  }
+
   function isWindowMaximized() {
     if (isNativeHost()) {
       return api('GET', '/api/window/is-maximized').then((data) => Boolean(data?.maximized));
@@ -497,6 +510,8 @@
     minimizeWindow,
     toggleWindowMaximize,
     closeWindow,
+    bringWindowToFront,
+    releaseWindowForeground,
     isWindowMaximized,
     setWindowFrameTheme,
     ensureWindowResizable,
@@ -532,7 +547,7 @@
       window.open(url, '_blank', 'noopener,noreferrer');
     },
     showAbout: async () => {
-      let appTitle = 'My Desktop Calendar v1.1.7';
+      let appTitle = 'My Desktop Calendar v1.1.8';
       try {
         const data = await api('GET', '/api/health');
         if (data?.name && data?.version) {
@@ -596,7 +611,7 @@
       window.dispatchEvent(new CustomEvent('mycalendar:nativeReady'));
       await window.myCalendarTray?.setupTray?.();
       if (Neutralino.window?.setTitle) {
-        await Neutralino.window.setTitle('My Desktop Calendar v1.1.7');
+        await Neutralino.window.setTitle('My Desktop Calendar v1.1.8');
       }
       if (Neutralino.app?.exitProcessOnClose !== undefined) {
         Neutralino.app.exitProcessOnClose = false;

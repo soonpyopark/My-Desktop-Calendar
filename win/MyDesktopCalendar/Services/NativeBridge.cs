@@ -958,7 +958,7 @@ internal sealed class NativeBridge
                 ? CalendarStoreService.SurfaceNative
                 : CalendarStoreService.SurfaceBrowser;
 
-            // Browser must not move/resize/opacity the WPF shell or change startup registration.
+            // Browser must not move/resize the WPF shell or change startup registration.
             if (!fromNativeShell)
             {
                 body.Remove("widget");
@@ -966,6 +966,12 @@ internal sealed class NativeBridge
                 {
                     vo.Remove("runAtStartup");
                 }
+            }
+
+            // Opacity control removed — always strip from patches.
+            if (body["widget"] is JsonObject widgetBody)
+            {
+                widgetBody.Remove("opacity");
             }
 
             var result = _store.PatchSettings(body, session.LoginId, clientSurface);
@@ -1241,13 +1247,13 @@ internal sealed class NativeBridge
         {
             _window.Dispatcher.Invoke(() =>
             {
-                // TitleBar enables these controls whenever DesktopHost isn't actively shown —
-                // which includes a temporary desktop-mode overlay (settings/quick-edit/auth/
-                // export). Minimizing there would hide AppWindow with no taskbar entry to
-                // restore it from (ShowInTaskbar=false) while DesktopHost is already hidden
-                // underneath — the calendar would vanish from the desktop until the user finds
-                // the tray menu, and the suspend flag would stay stuck true. Cancel the overlay
-                // and resume the desktop surface instead, same as the in-UI close button.
+                // Desktop (locked) mode: no minimize. Overlay suspend: cancel overlay instead.
+                if (_embed.IsShellParented || (_surfaces?.IsDesktopSurfaceActive ?? false))
+                {
+                    _ = CancelSuspendedOverlayIfActive();
+                    return;
+                }
+
                 if (CancelSuspendedOverlayIfActive())
                 {
                     return;
@@ -1262,7 +1268,7 @@ internal sealed class NativeBridge
         {
             _window.Dispatcher.Invoke(() =>
             {
-                if (_embed.IsEmbedded || (_surfaces?.IsDesktopSurfaceActive ?? false))
+                if (_embed.IsShellParented || _embed.IsEmbedded || (_surfaces?.IsDesktopSurfaceActive ?? false))
                 {
                     return;
                 }
@@ -1284,13 +1290,47 @@ internal sealed class NativeBridge
             return new JsonObject { ["maximized"] = maximized };
         }
 
+        if (path == "/api/window/bring-to-front" && method == "POST")
+        {
+            _window.Dispatcher.Invoke(() =>
+            {
+                // Only meaningful in desktop (locked) mode; window mode is already free to raise.
+                if (_embed.IsShellParented || (_surfaces?.IsDesktopSurfaceActive ?? false) || _embed.IsAlwaysOnBottom)
+                {
+                    _embed.BringToFront();
+                    try
+                    {
+                        _window.Activate();
+                    }
+                    catch
+                    {
+                        /* ignore */
+                    }
+                }
+            });
+            return new JsonObject { ["ok"] = true };
+        }
+
+        if (path == "/api/window/release-foreground" && method == "POST")
+        {
+            _window.Dispatcher.Invoke(() =>
+            {
+                _embed.ReleaseForegroundOverride();
+            });
+            return new JsonObject { ["ok"] = true };
+        }
+
         if (path == "/api/window/close" && method == "POST")
         {
             _window.Dispatcher.Invoke(() =>
             {
-                // Same reasoning as /api/window/minimize above: a bare Hide() while a
-                // temporary desktop-mode overlay is suspended would leave AppWindow AND
-                // DesktopHost both invisible with the suspended flag stuck.
+                // Desktop (locked) mode: no close from title chrome. Overlay: cancel overlay.
+                if (_embed.IsShellParented || (_surfaces?.IsDesktopSurfaceActive ?? false))
+                {
+                    _ = CancelSuspendedOverlayIfActive();
+                    return;
+                }
+
                 if (CancelSuspendedOverlayIfActive())
                 {
                     return;
@@ -1412,7 +1452,7 @@ internal sealed class NativeBridge
         }
     }
 
-    /// <summary>Apply run-at-startup + window opacity from the current store settings.</summary>
+    /// <summary>Apply run-at-startup from the current store settings; force fully opaque chrome.</summary>
     public void ApplyShellSettingsFromStore()
     {
         try
@@ -1439,94 +1479,24 @@ internal sealed class NativeBridge
                 StartupRegistrationService.Apply(runAtStartup);
             }
 
-            var opacity = ReadWidgetOpacity(settings);
-            _embed.SetOpacity(opacity);
-            ApplyMainWindowOpacity(opacity);
-            // Push fill-alpha to the WebView (true wallpaper see-through).
-            NotifyShellOpacity(opacity);
-        }
-        catch
-        {
-            /* ignore */
-        }
-    }
-
-    private void NotifyShellOpacity(double opacity)
-    {
-        try
-        {
-            PostEvent(new JsonObject
+            _embed.ForceFullyOpaque();
+            try
             {
-                ["type"] = "shell-opacity",
-                ["opacity"] = DesktopEmbedService.NormalizeOpacity(opacity),
-            });
-        }
-        catch
-        {
-            /* ignore */
-        }
-    }
-
-    private static double ReadWidgetOpacity(JsonObject settings)
-    {
-        if (settings["widget"] is not JsonObject widget
-            || widget["opacity"] is not JsonValue value)
-        {
-            return AppConstants.DefaultOpacity;
-        }
-
-        if (value.TryGetValue<double>(out var d))
-        {
-            return DesktopEmbedService.NormalizeOpacity(d);
-        }
-
-        if (value.TryGetValue<int>(out var i))
-        {
-            return DesktopEmbedService.NormalizeOpacity(i);
-        }
-
-        if (value.TryGetValue<long>(out var l))
-        {
-            return DesktopEmbedService.NormalizeOpacity(l);
-        }
-
-        if (value.TryGetValue<string>(out var s)
-            && double.TryParse(s, System.Globalization.NumberStyles.Any,
-                System.Globalization.CultureInfo.InvariantCulture, out var parsed))
-        {
-            return DesktopEmbedService.NormalizeOpacity(parsed);
-        }
-
-        return AppConstants.DefaultOpacity;
-    }
-
-    /// <summary>
-    /// Keep WPF Opacity at 1 — translucency is owned by <see cref="DesktopEmbedService.SetOpacity"/>.
-    /// </summary>
-    private void ApplyMainWindowOpacity(double opacity)
-    {
-        try
-        {
-            _ = opacity;
-            void ApplyWpf()
-            {
-                try
+                if (_window.Dispatcher.CheckAccess())
                 {
                     _window.Opacity = 1.0;
                 }
-                catch
+                else
                 {
-                    /* disposed */
+                    _ = _window.Dispatcher.BeginInvoke(() =>
+                    {
+                        try { _window.Opacity = 1.0; } catch { /* disposed */ }
+                    });
                 }
             }
-
-            if (_window.Dispatcher.CheckAccess())
+            catch
             {
-                ApplyWpf();
-            }
-            else
-            {
-                _ = _window.Dispatcher.BeginInvoke(ApplyWpf);
+                /* ignore */
             }
         }
         catch

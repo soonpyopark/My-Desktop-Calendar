@@ -45,7 +45,6 @@ import {
   resolveEffectiveColorScheme,
 } from './lib/colorScheme.js';
 import { applyAccentColor, getAccentColor, readStoredAccentColor } from './lib/accentColor.js';
-import { applyShellOpacity } from './lib/shellOpacity.js';
 import { notifyShellReady } from './lib/notifyShellReady.js';
 import { isNativeHost } from './lib/nativeHost.js';
 import { isDesktopSurfaceHost, isNeutralinoDesktopShell } from './lib/isNeutralinoDesktopShell.js';
@@ -489,6 +488,10 @@ export default function App() {
   /** Day-cell double-click / 더보기 → quick-edit (not the full EventEditor). */
   const openDayQuickEdit = useCallback((date, anchorRect, { focusEvent = null } = {}) => {
     if (!isLoggedIn) return;
+    // Desktop mode sits under other apps — raise for the quick-edit interaction.
+    if (isNativeHost()) {
+      void window.myCalendar?.bringWindowToFront?.();
+    }
     setSelectedDate(date);
     setActiveEvent(null);
     setActiveEventDay(null);
@@ -1303,20 +1306,6 @@ export default function App() {
     void window.myCalendar?.setWindowFrameTheme?.(effective === 'dark');
   }, [colorScheme]);
 
-  const shellOpacity = store?.settings?.widget?.opacity ?? DEFAULT_SETTINGS.widget.opacity;
-  useEffect(() => {
-    applyShellOpacity(shellOpacity);
-  }, [shellOpacity, colorScheme]);
-
-  useEffect(() => {
-    const onOpacity = (event) => {
-      const next = event?.detail?.opacity;
-      if (next != null) applyShellOpacity(next);
-    };
-    window.addEventListener('mycalendar:shellOpacity', onOpacity);
-    return () => window.removeEventListener('mycalendar:shellOpacity', onOpacity);
-  }, []);
-
   const accentColor = store?.settings?.viewOptions
     ? getAccentColor(store.settings.viewOptions)
     : (readStoredAccentColor() ?? DEFAULT_VIEW_OPTIONS.accentColor);
@@ -1341,6 +1330,19 @@ export default function App() {
       void window.myCalendar?.ensureWindowResizable?.();
     }
   }, [loading, store]);
+
+  // Desktop always-on-bottom: stay raised while quick-edit (or the full editor opened
+  // from it) is up; return under other windows when both are closed.
+  // Must stay above any early return — conditional hooks trigger React #310.
+  useEffect(() => {
+    if (!isNativeHost() || !window.myCalendar) return undefined;
+    if (quickEdit || editorOpen) {
+      void window.myCalendar.bringWindowToFront?.();
+      return undefined;
+    }
+    void window.myCalendar.releaseWindowForeground?.();
+    return undefined;
+  }, [quickEdit, editorOpen]);
 
   // Login wall: show the login dialog first whenever the app isn't authenticated yet.
   const autoLoginPromptedRef = useRef(false);

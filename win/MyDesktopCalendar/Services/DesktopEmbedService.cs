@@ -1,15 +1,15 @@
 using System.Text.Json.Nodes;
 using System.Windows;
+using System.Windows.Threading;
 using MyDesktopCalendar;
 using MyDesktopCalendar.Native;
 
 namespace MyDesktopCalendar.Services;
 
 /// <summary>
-/// Single-HWND desktop surface for <see cref="MainWindow"/>.
-/// Desktop mode: top-level <c>WS_POPUP</c> at the locked bounds, z-ordered to the bottom
-/// (sits on the desktop, covered by normal apps). No <c>SetParent</c> / SysListView32 child.
-/// Window mode: same HWND with thick-frame popup styles brought to the foreground.
+/// Single-HWND chrome/lock helper for <see cref="MainWindow"/>.
+/// Desktop mode = locked window + always-on-bottom z-order (no wallpaper SetParent).
+/// Window mode = same HWND, unlocked for move/resize via WPF + TitleBar.
 /// </summary>
 internal sealed class DesktopEmbedService
 {
@@ -35,34 +35,38 @@ internal sealed class DesktopEmbedService
     /// though Host is still covered by App at that point.
     /// </summary>
     private Bounds? _lastAppliedBounds;
-    private byte _alpha = 255;
-    private System.Windows.Threading.DispatcherTimer? _maintenance;
-
     /// <summary>
-    /// Desktop mode uses a top-level <c>WS_POPUP</c>, so WebView2 receives native clicks.
-    /// Name retained for the status/JS API (<c>popupStyleEmbed</c>).
+    /// Always true in desktop (locked) mode — native clicks reach WebView2; zone monitors
+    /// must not synthesize clicks. Name retained for the status/JS API.
     /// </summary>
     private bool _popupStyleEmbed;
 
-    /// <summary>Desktop-mode surface active (top-level WS_POPUP on the desktop z-band).</summary>
+    /// <summary>Desktop mode: keep this HWND under other top-level windows.</summary>
+    private bool _alwaysOnBottom;
+    /// <summary>Temporarily allow raise (quick-edit / day double-click).</summary>
+    private bool _foregroundOverride;
+    private DispatcherTimer? _bottomZOrderTimer;
+
+    /// <summary>Desktop (locked) mode active.</summary>
     public bool IsShellParented { get; private set; }
 
-    /// <summary>Host HWND is visible on the desktop surface.</summary>
+    /// <summary>True while desktop mode holds the window at HWND_BOTTOM.</summary>
+    public bool IsAlwaysOnBottom => _alwaysOnBottom;
+
+    /// <summary>True while quick-edit (etc.) has raised the window above other apps.</summary>
+    public bool IsForegroundOverride => _foregroundOverride;
+
+    /// <summary>Host HWND is visible.</summary>
     public bool IsSurfaceVisible { get; private set; }
 
-    /// <summary>Desktop mode and currently visible.</summary>
+    /// <summary>Desktop (locked) mode and currently visible.</summary>
     public bool IsEmbedded => IsShellParented && IsSurfaceVisible;
 
-    /// <summary>
-    /// Always true in desktop mode (top-level popup). Zone monitors skip synthetic
-    /// create/edit clicks that would double-fire with native WebView input.
-    /// </summary>
+    /// <summary>True in locked desktop mode (native input; no zone click synthesis).</summary>
     public bool IsPopupStyleEmbed => _popupStyleEmbed;
 
     public EmbedInfo LastInfo => _last;
     public Bounds? LockedBounds => _lockedBounds;
-    /// <summary>True when window alpha is fully opaque (no wallpaper see-through).</summary>
-    public bool IsFullyOpaque => _alpha >= 255;
 
     public void LockScreenBounds(Bounds bounds)
     {
@@ -75,8 +79,7 @@ internal sealed class DesktopEmbedService
         _lastAppliedBounds = null;
         ApplyStableBorderlessStyles(hwnd);
         DisableDwmTransitions(hwnd);
-        // Do NOT call DwmExtendFrameIntoClientArea while shell-parented (washes DefView).
-        ApplyAlphaTree();
+        ForceFullyOpaque();
     }
 
     public void AttachHost(Window host)
@@ -87,31 +90,265 @@ internal sealed class DesktopEmbedService
     public IntPtr Hwnd => _hwnd;
 
     /// <summary>
-    /// Re-apply DWM frame after theme/style changes.
+    /// Re-apply fully-opaque chrome after theme/style changes.
     /// </summary>
     public void RefreshContentAlpha()
     {
-        ApplyAlphaTree();
+        ForceFullyOpaque();
     }
 
-    public void SetOpacity(double opacity)
+    /// <summary>Drop layered alpha — window is always fully opaque.</summary>
+    public void ForceFullyOpaque()
     {
-        var clamped = NormalizeOpacity(opacity);
-        _alpha = (byte)Math.Clamp((int)Math.Round(clamped * 255.0), 13, 255);
-        // Never use WPF Opacity for translucency (blends against a dark intermediate).
-        // See-through is a single Win32 LWA_ALPHA on the host HWND when alpha < 255.
         ApplyWpfHostOpacity(1.0);
-        ApplyAlphaTree();
+        if (_hwnd != IntPtr.Zero && Win32.IsWindow(_hwnd))
+        {
+            ClearLayeredStyle(_hwnd);
+        }
     }
 
-    public double GetOpacity() => _alpha / 255.0;
-
-    /// <summary>Snap to 5% steps in [MinOpacity, 1].</summary>
-    public static double NormalizeOpacity(double opacity)
+    /// <summary>
+    /// Desktop mode only: park under other windows and keep re-asserting HWND_BOTTOM
+    /// so clicks/activation do not raise the calendar above other apps.
+    /// </summary>
+    public void EnableAlwaysOnBottom(bool enabled)
     {
-        var clamped = Math.Clamp(opacity, AppConstants.MinOpacity, 1.0);
-        clamped = Math.Round(clamped * 20.0) / 20.0;
-        return Math.Clamp(clamped, AppConstants.MinOpacity, 1.0);
+        _alwaysOnBottom = enabled;
+        if (!enabled)
+        {
+            _foregroundOverride = false;
+            _bottomZOrderTimer?.Stop();
+            return;
+        }
+
+        if (!_foregroundOverride)
+        {
+            SendToBottom();
+        }
+
+        EnsureBottomZOrderTimer();
+        _bottomZOrderTimer!.Start();
+    }
+
+    /// <summary>
+    /// Raise above other windows for quick-edit / day interaction. Pauses HWND_BOTTOM
+    /// until <see cref="ReleaseForegroundOverride"/>.
+    /// </summary>
+    public void BringToFront()
+    {
+        _foregroundOverride = true;
+        if (_hwnd == IntPtr.Zero || !Win32.IsWindow(_hwnd))
+        {
+            return;
+        }
+
+        if (!Win32.IsWindowVisible(_hwnd) || Win32.IsIconic(_hwnd))
+        {
+            Win32.ShowWindow(_hwnd, Win32.SW_RESTORE);
+            IsSurfaceVisible = true;
+        }
+
+        _ = Win32.SetWindowPos(
+            _hwnd,
+            Win32.HWND_TOP,
+            0,
+            0,
+            0,
+            0,
+            Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_SHOWWINDOW);
+
+        try
+        {
+            _hostWindow?.Activate();
+        }
+        catch
+        {
+            /* ignore */
+        }
+
+        Win32.SetForegroundWindow(_hwnd);
+    }
+
+    /// <summary>End temporary raise; return to always-on-bottom when still in desktop mode.</summary>
+    public void ReleaseForegroundOverride()
+    {
+        if (!_foregroundOverride)
+        {
+            return;
+        }
+
+        _foregroundOverride = false;
+        if (_alwaysOnBottom)
+        {
+            SendToBottom();
+        }
+    }
+
+    /// <summary>
+    /// Park under other apps but above the desktop shell (Progman/WorkerW).
+    /// Absolute HWND_BOTTOM goes under Win+D's show-desktop WorkerW and "vanishes".
+    /// </summary>
+    public void SendToBottom()
+    {
+        if (_foregroundOverride || _hwnd == IntPtr.Zero || !Win32.IsWindow(_hwnd))
+        {
+            return;
+        }
+
+        var shell = FindDesktopShellWindow();
+        if (shell != IntPtr.Zero && shell != _hwnd)
+        {
+            // Place immediately above the desktop shell: insert below the window that
+            // currently precedes the shell in Z-order (GW_HWNDPREV = window above).
+            var aboveShell = Win32.GetWindow(shell, Win32.GW_HWNDPREV);
+            if (aboveShell == _hwnd)
+            {
+                return;
+            }
+
+            if (aboveShell != IntPtr.Zero)
+            {
+                _ = Win32.SetWindowPos(
+                    _hwnd,
+                    aboveShell,
+                    0,
+                    0,
+                    0,
+                    0,
+                    Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE | Win32.SWP_SHOWWINDOW);
+                return;
+            }
+        }
+
+        _ = Win32.SetWindowPos(
+            _hwnd,
+            Win32.HWND_BOTTOM,
+            0,
+            0,
+            0,
+            0,
+            Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE | Win32.SWP_SHOWWINDOW);
+    }
+
+    /// <summary>
+    /// Desktop mode: undo Win+D / minimize-all / cloak so the calendar stays on the desktop.
+    /// </summary>
+    public void EnsureVisibleOnDesktop()
+    {
+        if (!_alwaysOnBottom || _hwnd == IntPtr.Zero || !Win32.IsWindow(_hwnd))
+        {
+            return;
+        }
+
+        // Force-uncloak — shell show-desktop can leave DWM cloak set.
+        var cloakOff = 0;
+        _ = Win32.DwmSetWindowAttribute(_hwnd, Win32.DWMWA_CLOAK, ref cloakOff, sizeof(int));
+
+        try
+        {
+            if (_hostWindow is not null)
+            {
+                if (_hostWindow.WindowState != WindowState.Normal)
+                {
+                    _hostWindow.WindowState = WindowState.Normal;
+                }
+
+                if (_hostWindow.Visibility != Visibility.Visible)
+                {
+                    _hostWindow.Visibility = Visibility.Visible;
+                }
+
+                if (!_hostWindow.IsVisible)
+                {
+                    _hostWindow.Show();
+                }
+            }
+        }
+        catch
+        {
+            /* ignore */
+        }
+
+        if (!Win32.IsWindowVisible(_hwnd) || Win32.IsIconic(_hwnd) || IsDwmCloaked(_hwnd))
+        {
+            Win32.ShowWindow(_hwnd, Win32.SW_SHOWNOACTIVATE);
+            Win32.ShowWindow(_hwnd, Win32.SW_RESTORE);
+        }
+
+        IsSurfaceVisible = true;
+
+        if (!_foregroundOverride)
+        {
+            SendToBottom();
+        }
+    }
+
+    private void EnsureBottomZOrderTimer()
+    {
+        if (_bottomZOrderTimer is not null)
+        {
+            return;
+        }
+
+        // Fast enough to undo Win+D before it "sticks"; light when already healthy.
+        _bottomZOrderTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        _bottomZOrderTimer.Tick += (_, _) =>
+        {
+            if (_alwaysOnBottom && IsShellParented && !_foregroundOverride)
+            {
+                EnsureVisibleOnDesktop();
+            }
+        };
+    }
+
+    private static bool IsDwmCloaked(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        try
+        {
+            return Win32.DwmGetWindowAttribute(hwnd, Win32.DWMWA_CLOAKED, out var cloaked, sizeof(int)) == 0
+                   && cloaked != 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Progman or WorkerW that hosts SHELLDLL_DefView — z-order anchor only (no SetParent).
+    /// </summary>
+    private static IntPtr FindDesktopShellWindow()
+    {
+        var progman = Win32.FindWindowW("Progman", "Program Manager");
+        if (progman == IntPtr.Zero)
+        {
+            progman = Win32.FindWindowW("Progman", null);
+        }
+
+        if (progman != IntPtr.Zero
+            && Win32.FindWindowExW(progman, IntPtr.Zero, "SHELLDLL_DefView", null) != IntPtr.Zero)
+        {
+            return progman;
+        }
+
+        IntPtr result = IntPtr.Zero;
+        Win32.EnumWindows((top, _) =>
+        {
+            if (Win32.FindWindowExW(top, IntPtr.Zero, "SHELLDLL_DefView", null) != IntPtr.Zero)
+            {
+                result = top;
+                return false;
+            }
+
+            return true;
+        }, IntPtr.Zero);
+
+        return result;
     }
 
     public Bounds GetCurrentBounds()
@@ -124,22 +361,72 @@ internal sealed class DesktopEmbedService
         return new Bounds(rect.Left, rect.Top, Math.Max(200, rect.Right - rect.Left), Math.Max(150, rect.Bottom - rect.Top));
     }
 
+    /// <summary>
+    /// First-install / first-run footprint on the primary monitor.
+    /// Captured from the design session and snapped down to multiples of 5
+    /// (31→30, 36→35). Subsequent launches use the user's saved bounds instead.
+    /// </summary>
     public static Bounds GetDefaultBounds()
     {
-        var vx = Win32.GetSystemMetrics(Win32.SM_XVIRTUALSCREEN);
-        var vy = Win32.GetSystemMetrics(Win32.SM_YVIRTUALSCREEN);
-        var vw = Win32.GetSystemMetrics(Win32.SM_CXVIRTUALSCREEN);
-        var vh = Win32.GetSystemMetrics(Win32.SM_CYVIRTUALSCREEN);
-        var w = (int)Math.Round(1920 * 0.8);
-        var h = (int)Math.Round(1080 * 0.8);
-        return new Bounds(vx + Math.Max(0, (vw - w) / 2), vy + Math.Max(0, (vh - h) / 2), w, h);
+        var primary = GetPrimaryMonitorBounds();
+        var w = Math.Min(AppConstants.FactoryDefaultWidth, Math.Max(200, primary.Width));
+        var h = Math.Min(AppConstants.FactoryDefaultHeight, Math.Max(150, primary.Height));
+        w = SnapDownTo5(w);
+        h = SnapDownTo5(h);
+
+        var x = SnapDownTo5(primary.X + AppConstants.FactoryDefaultOffsetX);
+        var y = SnapDownTo5(primary.Y + AppConstants.FactoryDefaultOffsetY);
+        if (x + w > primary.X + primary.Width)
+        {
+            x = SnapDownTo5(primary.X + primary.Width - w);
+        }
+
+        if (y + h > primary.Y + primary.Height)
+        {
+            y = SnapDownTo5(primary.Y + primary.Height - h);
+        }
+
+        x = Math.Max(primary.X, x);
+        y = Math.Max(primary.Y, y);
+        return new Bounds(SnapDownTo5(x), SnapDownTo5(y), w, h);
+    }
+
+    /// <summary>Floor to a multiple of 5 (31→30, 36→35). Works for negative coords too.</summary>
+    public static int SnapDownTo5(int value) => (int)(Math.Floor(value / 5.0) * 5);
+
+    public static Bounds SnapBoundsDownTo5(Bounds bounds)
+        => new(
+            SnapDownTo5(bounds.X),
+            SnapDownTo5(bounds.Y),
+            Math.Max(200, SnapDownTo5(bounds.Width)),
+            Math.Max(150, SnapDownTo5(bounds.Height)));
+
+    private static Bounds GetPrimaryMonitorBounds()
+    {
+        try
+        {
+            var screen = System.Windows.Forms.Screen.PrimaryScreen;
+            if (screen is not null)
+            {
+                var b = screen.Bounds;
+                return new Bounds(b.X, b.Y, Math.Max(200, b.Width), Math.Max(150, b.Height));
+            }
+        }
+        catch
+        {
+            /* fall through */
+        }
+
+        var w = Win32.GetSystemMetrics(0); // SM_CXSCREEN
+        var h = Win32.GetSystemMetrics(1); // SM_CYSCREEN
+        return new Bounds(0, 0, Math.Max(200, w), Math.Max(150, h));
     }
 
     /// <summary>
     /// Clamp/recenter bounds cached before a monitor sleep/wake, cable reconnect, resolution,
     /// DPI, or arrangement change onto the *current* virtual screen. Without this, a shrunk or
     /// reshuffled virtual desktop can leave <see cref="_lockedBounds"/> parked entirely over
-    /// screen space that no longer exists — the calendar looks "gone" even once re-parented.
+    /// screen space that no longer exists — the calendar looks "gone".
     /// </summary>
     private static Bounds ClampToVirtualScreen(Bounds bounds)
     {
@@ -167,8 +454,7 @@ internal sealed class DesktopEmbedService
     }
 
     /// <summary>
-    /// After a display-topology change, reclamp locked bounds and re-assert
-    /// top-level popup desktop styles + z-order.
+    /// After a display-topology change, reclamp locked bounds onto the virtual screen.
     /// </summary>
     public void HandleDisplayChanged()
     {
@@ -180,25 +466,23 @@ internal sealed class DesktopEmbedService
                 _lockedBounds = ClampToVirtualScreen(bounds);
             }
 
-            if (!IsShellParented || _hwnd == IntPtr.Zero || !Win32.IsWindow(_hwnd))
+            if (!IsShellParented || _hwnd == IntPtr.Zero || !Win32.IsWindow(_hwnd) || !IsSurfaceVisible)
             {
                 return;
             }
 
             var target = _lockedBounds ?? GetCurrentBounds();
-            if (IsSurfaceVisible)
+            ApplyBorderlessPopupStyles(_hwnd);
+            if (!BoundsNearlyEqual(GetCurrentBounds(), target))
             {
-                ApplyBorderlessPopupStyles(_hwnd);
-                if (!BoundsNearlyEqual(GetCurrentBounds(), target))
-                {
-                    SnapMoveAndSize(target);
-                }
-
-                ApplyDesktopZOrder();
+                SnapMoveAndSize(target);
             }
+
+            ForceFullyOpaque();
         }
     }
 
+    /// <summary>Enter desktop (locked) mode — no wallpaper embed, no z-order park.</summary>
     public EmbedInfo Embed(Bounds? bounds = null)
     {
         lock (_gate)
@@ -211,43 +495,35 @@ internal sealed class DesktopEmbedService
             var targetBounds = Normalize(bounds ?? _lockedBounds ?? GetCurrentBounds());
             _lockedBounds = targetBounds;
 
-            // Already in desktop popup mode — show/reposition only.
             if (IsShellParented)
             {
                 ShowSurfaceUnlocked(targetBounds);
-                ApplyDesktopZOrder();
                 _last = new EmbedInfo(
                     true,
-                    "popup",
+                    "locked",
                     "auto",
-                    "ws-popup",
+                    "window-lock",
                     _last.Attempts,
                     DateTime.UtcNow.ToString("o"));
-                StartMaintenance(targetBounds);
                 return _last;
             }
 
-            EmbedAsTopLevelPopup(targetBounds);
-            var attempts = new List<object>
-            {
-                new { mode = "ws-popup", ok = true, zorder = "HWND_BOTTOM" },
-            };
+            ApplyLockedDesktopMode(targetBounds);
             IsShellParented = true;
             IsSurfaceVisible = true;
             _popupStyleEmbed = true;
             _last = new EmbedInfo(
                 true,
-                "popup",
+                "locked",
                 "auto",
-                "ws-popup",
-                attempts,
+                "window-lock",
+                [new { mode = "window-lock", ok = true }],
                 DateTime.UtcNow.ToString("o"));
-            StartMaintenance(targetBounds);
             return _last;
         }
     }
 
-    /// <summary>Show the shell-parented host without reparenting.</summary>
+    /// <summary>Show the locked host without changing mode.</summary>
     public void ShowSurface(Bounds? bounds = null)
     {
         lock (_gate)
@@ -255,19 +531,14 @@ internal sealed class DesktopEmbedService
             var target = Normalize(bounds ?? _lockedBounds ?? GetCurrentBounds());
             _lockedBounds = target;
             ShowSurfaceUnlocked(target);
-            if (IsShellParented)
-            {
-                StartMaintenance(target);
-            }
         }
     }
 
-    /// <summary>Hide host; stay in desktop-mode style until <see cref="ReleaseShellHost"/>.</summary>
+    /// <summary>Hide host; stay in desktop (locked) mode until <see cref="ReleaseShellHost"/>.</summary>
     public void HideSurface()
     {
         lock (_gate)
         {
-            StopMaintenance();
             if (_hwnd != IntPtr.Zero && Win32.IsWindow(_hwnd))
             {
                 Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
@@ -279,34 +550,25 @@ internal sealed class DesktopEmbedService
                 false,
                 null,
                 "auto",
-                IsShellParented ? "hidden-popup" : "none",
+                IsShellParented ? "hidden-locked" : "none",
                 [],
                 DateTime.UtcNow.ToString("o"));
         }
     }
 
-    /// <summary>
-    /// Leave desktop mode: raise z-order only. Styles and footprint stay identical
-    /// so the window does not resize on every mode toggle.
-    /// </summary>
+    /// <summary>Leave desktop (locked) mode — unlock chrome; keep footprint.</summary>
     public void ReleaseShellHost(Bounds? topLevelBounds = null)
     {
         lock (_gate)
         {
-            StopMaintenance();
             var hwnd = _hwnd;
             if (hwnd != IntPtr.Zero && Win32.IsWindow(hwnd))
             {
-                // Remember live rect for persistence — do not SetWindowPos size/pos.
                 var live = GetCurrentBounds();
                 _lockedBounds = Normalize(topLevelBounds ?? live);
                 _lastAppliedBounds = live;
-                // ApplyBorderlessPopupStyles already manages WS_EX_LAYERED consistently
-                // for the current alpha. A second blind re-add here (old EnsureLayeredAlpha)
-                // set WS_EX_LAYERED without SWP_FRAMECHANGED right after it had just been
-                // cleared, leaving DWM's redirection surface inconsistent for a frame —
-                // that was the recurring black side-bar flash on every mode toggle.
                 ApplyBorderlessPopupStyles(hwnd);
+                ForceFullyOpaque();
                 _ = Win32.SetWindowPos(
                     hwnd,
                     Win32.HWND_TOP,
@@ -321,6 +583,7 @@ internal sealed class DesktopEmbedService
             IsShellParented = false;
             IsSurfaceVisible = hwnd != IntPtr.Zero && Win32.IsWindow(hwnd);
             _popupStyleEmbed = false;
+            EnableAlwaysOnBottom(false);
             _last = new EmbedInfo(
                 false,
                 null,
@@ -340,10 +603,8 @@ internal sealed class DesktopEmbedService
 
         _lockedBounds = targetBounds;
         Win32.ShowWindow(_hwnd, Win32.SW_SHOWNOACTIVATE);
-        // Desktop show: z-order only — never resize (mode toggle / resume).
-        ApplyDesktopZOrder();
         IsSurfaceVisible = true;
-        ApplyAlphaTree();
+        ForceFullyOpaque();
     }
 
     /// <summary>
@@ -368,7 +629,6 @@ internal sealed class DesktopEmbedService
             ["surfaceVisible"] = IsSurfaceVisible,
             ["preferredStrategy"] = "auto",
             ["popupStyleEmbed"] = _popupStyleEmbed,
-            ["opacity"] = GetOpacity(),
             ["lockedBounds"] = _lockedBounds is null
                 ? null
                 : new JsonObject
@@ -391,7 +651,7 @@ internal sealed class DesktopEmbedService
         };
     }
 
-    /// <summary>Snapshot of Progman/WorkerW/DefView/OS for readiness and diagnostics.</summary>
+    /// <summary>OS / runtime snapshot for readiness and diagnostics.</summary>
     public JsonObject GetCapabilitySnapshot() => DetectCapabilities();
 
     public JsonObject GetStatus()
@@ -406,9 +666,8 @@ internal sealed class DesktopEmbedService
             ["editMode"] = !IsEmbedded,
             ["dualHwnd"] = false,
             ["platform"] = "wpf-native",
-            // Top-level WS_POPUP desktop mode — native clicks reach the WebView DOM.
+            // Locked desktop mode — native clicks reach the WebView DOM (no zone synthesis).
             ["popupStyleEmbed"] = _popupStyleEmbed,
-            ["opacity"] = GetOpacity(),
             ["bounds"] = (_lockedBounds ?? GetCurrentBounds()) is var b
                 ? new JsonObject { ["x"] = b.X, ["y"] = b.Y, ["width"] = b.Width, ["height"] = b.Height }
                 : null,
@@ -423,56 +682,25 @@ internal sealed class DesktopEmbedService
     }
 
     /// <summary>
-    /// True when the SysListView32/WS_CHILD path's shell targets (Progman → DefView →
-    /// SysListView32) can currently be resolved, with no side effects on <c>_hwnd</c>.
-    /// Immediately after a fresh login/reboot our own auto-start commonly wins the race
-    /// against Explorer still building the desktop icon list, so the very first boot embed
-    /// can find nothing here and <see cref="Embed"/> throws (no other embed path exists —
-    /// see this class's summary). Callers (see DesktopSurfaceController's boot wait) use
-    /// this to poll briefly before committing to the first <see cref="Embed"/> call.
+    /// Lock desktop mode: keep footprint and borderless styles. Move/resize/chrome are
+    /// blocked by <see cref="MainWindow.ApplyWindowLockMode"/> (WPF + WndProc).
     /// </summary>
-    public static bool IsSysListView32Ready()
-    {
-        var progman = FindProgman();
-        if (progman == IntPtr.Zero)
-        {
-            return false;
-        }
-
-        SpawnWorkerW(progman);
-
-        var defView = FindDefViewUnder(progman);
-        if (defView == IntPtr.Zero)
-        {
-            defView = FindDesktopDefView();
-        }
-
-        if (defView == IntPtr.Zero)
-        {
-            return false;
-        }
-
-        return Win32.FindWindowExW(defView, IntPtr.Zero, "SysListView32", null) != IntPtr.Zero;
-    }
-
-    /// <summary>
-    /// Desktop mode: same borderless popup styles as window mode, z-ordered to
-    /// <c>HWND_BOTTOM</c>. No size/position recalculation — a mode toggle only ever
-    /// changes style + z-order, never touches the HWND's live footprint. Whatever the
-    /// window was positioned/sized at (via <see cref="SnapMoveAndSize"/> on boot/restore
-    /// or plain user resize) carries over untouched.
-    /// </summary>
-    private void EmbedAsTopLevelPopup(Bounds screenBounds)
+    private void ApplyLockedDesktopMode(Bounds screenBounds)
     {
         ApplyBorderlessPopupStyles(_hwnd);
-        ApplyWpfHostOpacity(1.0);
-        ApplyAlphaTree();
+        ForceFullyOpaque();
 
-        _ = screenBounds;
-        _lockedBounds = GetCurrentBounds();
-        _lastAppliedBounds = _lockedBounds;
+        var target = Normalize(screenBounds);
+        if (!BoundsNearlyEqual(GetCurrentBounds(), target))
+        {
+            SnapMoveAndSize(target);
+        }
+        else
+        {
+            _lockedBounds = target;
+            _lastAppliedBounds = target;
+        }
 
-        ApplyDesktopZOrder();
         Win32.ShowWindow(_hwnd, Win32.SW_SHOWNOACTIVATE);
         _popupStyleEmbed = true;
     }
@@ -482,66 +710,6 @@ internal sealed class DesktopEmbedService
            && Math.Abs(a.Y - b.Y) <= 1
            && Math.Abs(a.Width - b.Width) <= 1
            && Math.Abs(a.Height - b.Height) <= 1;
-
-    /// <summary>
-    /// Park the calendar just above Progman/the desktop icon layer — below every ordinary
-    /// app window, but above wallpaper + icons. Plain <c>HWND_BOTTOM</c> can land *below*
-    /// Progman/WorkerW (the actual desktop-icon layer), which leaves nothing for DWM to
-    /// blend against: <see cref="SetOpacity"/>'s LWA_ALPHA would then show black/empty
-    /// space behind the calendar at &lt;100% instead of letting the wallpaper/icons show
-    /// through it. Inserting explicitly after Progman's HWND guarantees a real backdrop.
-    /// </summary>
-    private void ApplyDesktopZOrder()
-    {
-        if (_hwnd == IntPtr.Zero || !Win32.IsWindow(_hwnd))
-        {
-            return;
-        }
-
-        var progman = FindProgman();
-        var insertAfter = (progman != IntPtr.Zero && Win32.IsWindow(progman)) ? progman : Win32.HWND_BOTTOM;
-
-        _ = Win32.SetWindowPos(
-            _hwnd,
-            insertAfter,
-            0,
-            0,
-            0,
-            0,
-            Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE | Win32.SWP_SHOWWINDOW);
-    }
-
-    private void StartMaintenance(Bounds bounds)
-    {
-        StopMaintenance();
-        _maintenance = new System.Windows.Threading.DispatcherTimer
-        {
-            Interval = TimeSpan.FromSeconds(5),
-        };
-        _maintenance.Tick += (_, _) =>
-        {
-            if (!IsShellParented || !IsSurfaceVisible || _hwnd == IntPtr.Zero || !Win32.IsWindow(_hwnd))
-            {
-                return;
-            }
-
-            // Re-assert bottom z-order only — never restyle/resize (that jumped size on toggle).
-            ApplyDesktopZOrder();
-            ApplyAlphaTree();
-        };
-        _maintenance.Start();
-    }
-
-    private void StopMaintenance()
-    {
-        if (_maintenance is null)
-        {
-            return;
-        }
-
-        _maintenance.Stop();
-        _maintenance = null;
-    }
 
     private static void DisableDwmTransitions(IntPtr hwnd)
     {
@@ -558,25 +726,8 @@ internal sealed class DesktopEmbedService
             sizeof(int));
     }
 
-    private static void ApplyLayeredAlphaToWindow(IntPtr hwnd, byte alpha)
-    {
-        if (hwnd == IntPtr.Zero || !Win32.IsWindow(hwnd))
-        {
-            return;
-        }
-
-        var ex = Win32.GetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE).ToInt64();
-        if ((ex & Win32.WS_EX_LAYERED) == 0)
-        {
-            Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE, new IntPtr(ex | Win32.WS_EX_LAYERED));
-        }
-
-        _ = Win32.SetLayeredWindowAttributes(hwnd, 0, alpha, Win32.LWA_ALPHA);
-    }
-
     /// <summary>
-    /// Remove WS_EX_LAYERED from a window tree. Fully-opaque layered under DefView can
-    /// fog wallpaper/icons on some GPU/driver builds.
+    /// Remove WS_EX_LAYERED from a window tree (legacy translucent sessions).
     /// </summary>
     private static void ClearLayeredStyle(IntPtr hwnd)
     {
@@ -611,24 +762,6 @@ internal sealed class DesktopEmbedService
             0,
             0,
             Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE | Win32.SWP_FRAMECHANGED);
-    }
-
-    private void ApplyAlphaTree()
-    {
-        if (_hwnd == IntPtr.Zero || !Win32.IsWindow(_hwnd))
-        {
-            return;
-        }
-
-        // Fully opaque: drop layered styles (avoids milky/dark DefView wash).
-        if (_alpha >= 255)
-        {
-            ClearLayeredStyle(_hwnd);
-            return;
-        }
-
-        // One alpha on the host HWND only. Per-Chromium-child LWA double-darkened the UI.
-        ApplyLayeredAlphaToWindow(_hwnd, _alpha);
     }
 
     private void ApplyWpfHostOpacity(double opacity)
@@ -686,11 +819,7 @@ internal sealed class DesktopEmbedService
         var ex = Win32.GetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE).ToInt64();
         var nextEx = ex;
         nextEx |= Win32.WS_EX_TOOLWINDOW;
-        nextEx &= ~(Win32.WS_EX_APPWINDOW | Win32.WS_EX_NOACTIVATE);
-        if (_alpha >= 255)
-        {
-            nextEx &= ~Win32.WS_EX_LAYERED;
-        }
+        nextEx &= ~(Win32.WS_EX_APPWINDOW | Win32.WS_EX_NOACTIVATE | Win32.WS_EX_LAYERED);
 
         if (nextStyle == style && nextEx == ex)
         {
@@ -698,16 +827,8 @@ internal sealed class DesktopEmbedService
         }
 
         Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_STYLE, new IntPtr(nextStyle));
-        if (_alpha >= 255)
-        {
-            Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE, new IntPtr(nextEx));
-            ClearLayeredStyle(hwnd);
-        }
-        else
-        {
-            Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE, new IntPtr(nextEx));
-            ApplyLayeredAlphaToWindow(hwnd, _alpha);
-        }
+        Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE, new IntPtr(nextEx));
+        ClearLayeredStyle(hwnd);
 
         // GWL_STYLE/EXSTYLE + SWP_FRAMECHANGED (inside ClearLayeredStyle) resets the
         // DWM border/caption color attributes to the system default — reassert the
@@ -770,153 +891,11 @@ internal sealed class DesktopEmbedService
         return new Bounds(b.X, b.Y, Math.Max(200, b.Width), Math.Max(150, b.Height));
     }
 
-    private static IntPtr FindProgman()
-    {
-        var hwnd = Win32.FindWindowW("Progman", "Program Manager");
-        return hwnd != IntPtr.Zero ? hwnd : Win32.FindWindowW("Progman", null);
-    }
-
-    /// <summary>
-    /// Win11 24H2+ desktop uses Progman with WS_EX_NOREDIRECTIONBITMAP and child DefView/WorkerW.
-    /// </summary>
-    private static bool IsModernDesktopComposition(IntPtr progman)
-    {
-        if (progman == IntPtr.Zero)
-        {
-            return false;
-        }
-
-        var ex = Win32.GetWindowLongPtrCompat(progman, Win32.GWL_EXSTYLE).ToInt64();
-        if ((ex & Win32.WS_EX_NOREDIRECTIONBITMAP) != 0)
-        {
-            return true;
-        }
-
-        return FindDefViewUnder(progman) != IntPtr.Zero;
-    }
-
-    private static void SpawnWorkerW(IntPtr progman)
-    {
-        if (progman == IntPtr.Zero)
-        {
-            return;
-        }
-
-        // Classic raise-desktop
-        Win32.SendMessageTimeoutW(progman, 0x052C, IntPtr.Zero, IntPtr.Zero, Win32.SMTO_NORMAL, 1000, out _);
-        // Dynamic wallpaper / Ivy / newer shells
-        Win32.SendMessageTimeoutW(progman, 0x052C, new IntPtr(0xD), IntPtr.Zero, Win32.SMTO_NORMAL, 1000, out _);
-        Win32.SendMessageTimeoutW(progman, 0x052C, new IntPtr(0xD), new IntPtr(1), Win32.SMTO_NORMAL, 1000, out _);
-    }
-
-    private static IntPtr FindWorkerW()
-    {
-        var progman = FindProgman();
-        SpawnWorkerW(progman);
-
-        var child = FindWorkerWChild(progman);
-        if (child != IntPtr.Zero)
-        {
-            return child;
-        }
-
-        return FindClassicSiblingWorkerW();
-    }
-
-    private static IntPtr FindWorkerWChild(IntPtr progman)
-    {
-        if (progman == IntPtr.Zero)
-        {
-            return IntPtr.Zero;
-        }
-
-        IntPtr child = IntPtr.Zero;
-        while (true)
-        {
-            child = Win32.FindWindowExW(progman, child, "WorkerW", null);
-            if (child == IntPtr.Zero)
-            {
-                return IntPtr.Zero;
-            }
-
-            // Wallpaper host WorkerW has no DefView; DefView lives as Progman sibling on 24H2+.
-            if (FindDefViewUnder(child) == IntPtr.Zero)
-            {
-                return child;
-            }
-        }
-    }
-
-    private static IntPtr FindClassicSiblingWorkerW()
-    {
-        IntPtr result = IntPtr.Zero;
-        Win32.EnumWindows((top, _) =>
-        {
-            var shell = Win32.FindWindowExW(top, IntPtr.Zero, "SHELLDLL_DefView", null);
-            if (shell == IntPtr.Zero)
-            {
-                return true;
-            }
-
-            var worker = Win32.FindWindowExW(IntPtr.Zero, top, "WorkerW", null);
-            if (worker != IntPtr.Zero && FindDefViewUnder(worker) == IntPtr.Zero)
-            {
-                result = worker;
-                return false;
-            }
-
-            return true;
-        }, IntPtr.Zero);
-        return result;
-    }
-
-    private static IntPtr FindDefViewUnder(IntPtr parent)
-    {
-        if (parent == IntPtr.Zero)
-        {
-            return IntPtr.Zero;
-        }
-
-        return Win32.FindWindowExW(parent, IntPtr.Zero, "SHELLDLL_DefView", null);
-    }
-
-    private static IntPtr FindDesktopDefView()
-    {
-        var progman = FindProgman();
-        var underProgman = FindDefViewUnder(progman);
-        if (underProgman != IntPtr.Zero)
-        {
-            return underProgman;
-        }
-
-        IntPtr result = IntPtr.Zero;
-        Win32.EnumWindows((top, _) =>
-        {
-            var defView = Win32.FindWindowExW(top, IntPtr.Zero, "SHELLDLL_DefView", null);
-            if (defView != IntPtr.Zero)
-            {
-                result = defView;
-                return false;
-            }
-
-            return true;
-        }, IntPtr.Zero);
-        return result;
-    }
-
     private static JsonObject DetectCapabilities()
     {
-        var progman = FindProgman();
-        SpawnWorkerW(progman);
-        var modern = IsModernDesktopComposition(progman);
         return new JsonObject
         {
-            ["progman"] = progman != IntPtr.Zero,
-            ["workerw"] = FindWorkerW() != IntPtr.Zero,
-            ["defView"] = FindDesktopDefView() != IntPtr.Zero,
-            ["modernDesktop"] = modern,
-            ["progmanNoRedirectionBitmap"] = progman != IntPtr.Zero
-                && (Win32.GetWindowLongPtrCompat(progman, Win32.GWL_EXSTYLE).ToInt64() & Win32.WS_EX_NOREDIRECTIONBITMAP) != 0,
+            ["windowLock"] = true,
             ["os"] = Environment.OSVersion.VersionString,
             ["build"] = Environment.OSVersion.Version.Build,
         };

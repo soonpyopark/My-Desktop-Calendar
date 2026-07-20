@@ -4,7 +4,7 @@ export const DEFAULT_PORT = 3010;
 import { CALENDAR_COLOR_PALETTE } from './calendarColorPalette.js';
 
 /** Application display version. */
-export const APP_VERSION = '1.1.7';
+export const APP_VERSION = '1.1.8';
 
 /** Application display name. */
 export const APP_NAME = 'My Desktop Calendar';
@@ -122,11 +122,12 @@ export const DEFAULT_HOLIDAYS_KR_SETTINGS = {
   lastSyncedAt: null,
 };
 
+/** First-install footprint (physical px), snapped to multiples of 5. Placed on primary monitor by the native shell. */
 export const DEFAULT_DESKTOP_WIDGET_BOUNDS = {
-  x: 400,
-  y: 60,
-  width: 1480,
-  height: 950,
+  x: 700,
+  y: 15,
+  width: 1195,
+  height: 1005,
 };
 
 export const DEFAULT_DESKTOP_WIDGET_MARGINS = {
@@ -146,8 +147,6 @@ export const DEFAULT_WIDGET_SETTINGS = {
   launchMode: WIDGET_LAUNCH_MODE.DESKTOP,
   enabled: true,
   alwaysOnTop: false,
-  /** Main window layered alpha (0.05–1.0, 5% steps). */
-  opacity: 1,
   /** Unused — both modes use the in-app custom title bar (kept for settings compat). */
   chromeTopInset: 0,
   chromeLeftInset: 0,

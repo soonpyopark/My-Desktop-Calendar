@@ -8,7 +8,7 @@ internal static class WindowFootprint
 {
     /// <summary>
     /// Keep WPF Left/Top/Width/Height in sync with Win32 physical-pixel bounds (DPI-aware).
-    /// Prevents WPF layout from nudging the HWND after SetParent/SetWindowPos.
+    /// Prevents WPF layout from nudging the HWND after SetWindowPos.
     /// </summary>
     public static void Sync(Window window, DesktopEmbedService.Bounds physical)
     {
@@ -21,7 +21,7 @@ internal static class WindowFootprint
 
     /// <summary>
     /// Never treat physical pixels as DIP — that oversized the window on &gt;100% DPI
-    /// (CompositionTarget briefly null / wrong after SetParent).
+    /// (CompositionTarget briefly null / wrong after style/pos changes).
     /// </summary>
     private static (double scaleX, double scaleY) GetDipScale(Window window)
     {

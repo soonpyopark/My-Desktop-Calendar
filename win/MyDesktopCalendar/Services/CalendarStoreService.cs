@@ -2201,9 +2201,8 @@ internal sealed class CalendarStoreService
         merged["launchMode"] = NormalizeWidgetLaunchMode(inputWidget);
         var launchMode = GetString(merged, "launchMode", "window");
         merged["enabled"] = launchMode == "desktop";
-        var opacity = Math.Clamp(GetDouble(merged, "opacity", AppConstants.DefaultOpacity), AppConstants.MinOpacity, 1.0);
-        opacity = Math.Round(opacity * 20.0) / 20.0;
-        merged["opacity"] = Math.Clamp(opacity, AppConstants.MinOpacity, 1.0);
+        // Opacity UI removed — always persist fully opaque (legacy values are overwritten).
+        merged.Remove("opacity");
         merged["chromeTopInset"] = ClampInt(GetDouble(inputWidget, "chromeTopInset", 0), 0, 200);
         merged["chromeLeftInset"] = ClampInt(GetDouble(inputWidget, "chromeLeftInset", 0), 0, 80);
         merged["chromeRightInset"] = ClampInt(GetDouble(inputWidget, "chromeRightInset", 0), 0, 80);
@@ -2422,6 +2421,21 @@ internal sealed class CalendarStoreService
         return result;
     }
 
+    /// <summary>
+    /// First-install bounds on the primary monitor (snapped to multiples of 5).
+    /// </summary>
+    private static JsonObject DefaultWidgetBoundsJson()
+    {
+        var b = DesktopEmbedService.GetDefaultBounds();
+        return new JsonObject
+        {
+            ["x"] = b.X,
+            ["y"] = b.Y,
+            ["width"] = b.Width,
+            ["height"] = b.Height,
+        };
+    }
+
     private static JsonObject CreateDefaultSettings()
     {
         return new JsonObject
@@ -2463,12 +2477,11 @@ internal sealed class CalendarStoreService
                 ["launchMode"] = "desktop",
                 ["enabled"] = true,
                 ["alwaysOnTop"] = false,
-                ["opacity"] = AppConstants.DefaultOpacity,
                 ["chromeTopInset"] = 0,
                 ["chromeLeftInset"] = 0,
                 ["chromeRightInset"] = 0,
                 ["chromeBottomInset"] = 0,
-                ["bounds"] = new JsonObject { ["x"] = 400, ["y"] = 60, ["width"] = 1480, ["height"] = 950 },
+                ["bounds"] = DefaultWidgetBoundsJson(),
                 ["margins"] = new JsonObject { ["left"] = 0.2, ["top"] = 0.05, ["right"] = 0.05, ["bottom"] = 0.05 },
             },
             ["dayColors"] = new JsonObject(),

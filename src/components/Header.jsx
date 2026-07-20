@@ -665,7 +665,7 @@ export default function Header({
       // isn't a silent no-op (see EnterDesktopModeFromTrayAsync in MainWindow.xaml.cs).
       if (result && result.available !== false && !result.embedded) {
         await alert(
-          ['바탕화면 임베드에 실패했습니다.', '', '창 모드에서는 계속 사용할 수 있습니다.'].join('\n'),
+          ['바탕화면 모드 전환에 실패했습니다.', '', '창 모드에서는 계속 사용할 수 있습니다.'].join('\n'),
           { title: '바탕화면 모드' },
         );
       }
@@ -791,9 +791,9 @@ export default function Header({
                 aria-disabled={applyingDesktop || isDesktopModeActive || !desktopReady}
                 title={
                   isDesktopModeActive
-                    ? '바탕화면 모드'
+                    ? '바탕화면 모드 (이동·크기조절·창 버튼 잠금)'
                     : desktopReady
-                      ? '현재 창 위치·크기로 바탕화면에 고정'
+                      ? '현재 위치·크기로 잠금 (이동·크기조절·창 버튼 숨김)'
                       : '조건 미충족 — 클릭하여 확인'
                 }
                 disabled={applyingDesktop || isDesktopModeActive}
@@ -811,7 +811,7 @@ export default function Header({
                 )}
                 aria-label="창모드"
                 aria-pressed={isWindowModeActive}
-                title="현재 위치·크기 그대로 일반 창으로 전환"
+                title="잠금 해제 — 이동·크기조절·창 버튼 사용"
                 onClick={() => void handleEnterWindowMode()}
               >
                 <WindowModeIcon />

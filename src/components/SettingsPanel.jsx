@@ -123,18 +123,6 @@ function CreateCalendarForm({ ownerName, settings, calendars, onCreateCalendar, 
   );
 }
 
-function opacityToPercent(opacity) {
-  const raw = Number(opacity);
-  const value = Number.isFinite(raw) ? raw : 1;
-  const clamped = Math.min(1, Math.max(0.05, value));
-  return Math.round(clamped * 20) * 5;
-}
-
-function percentToOpacity(percent) {
-  const stepped = Math.round(Number(percent) / 5) * 5;
-  return Math.min(1, Math.max(0.05, stepped / 100));
-}
-
 function ViewOptionsPanel({ settings, onSaveSettings }) {
   const shellControls = isNativeHost();
   const initial = { ...DEFAULT_VIEW_OPTIONS, ...settings?.viewOptions };
@@ -143,9 +131,6 @@ function ViewOptionsPanel({ settings, onSaveSettings }) {
   const [colorScheme, setColorScheme] = useState(() => getColorScheme(initial));
   const [accentColor, setAccentColor] = useState(() => getAccentColor(initial));
   const [runAtStartup, setRunAtStartup] = useState(initial.runAtStartup !== false);
-  const [opacityPercent, setOpacityPercent] = useState(() =>
-    opacityToPercent(settings?.widget?.opacity ?? DEFAULT_SETTINGS.widget.opacity),
-  );
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -156,7 +141,6 @@ function ViewOptionsPanel({ settings, onSaveSettings }) {
     setColorScheme(getColorScheme(next));
     setAccentColor(getAccentColor(next));
     setRunAtStartup(next.runAtStartup !== false);
-    setOpacityPercent(opacityToPercent(settings?.widget?.opacity ?? DEFAULT_SETTINGS.widget.opacity));
   }, [settings]);
 
   const buildViewOptions = (patch = {}) => ({
@@ -208,18 +192,6 @@ function ViewOptionsPanel({ settings, onSaveSettings }) {
   const handleRunAtStartupChange = async (checked) => {
     setRunAtStartup(checked);
     await persistViewOptions(buildViewOptions({ runAtStartup: checked }));
-  };
-
-  const handleOpacityChange = async (percent) => {
-    const nextPercent = opacityToPercent(percentToOpacity(percent));
-    setOpacityPercent(nextPercent);
-    setSaved(false);
-    try {
-      await onSaveSettings({ widget: { opacity: percentToOpacity(nextPercent) } });
-      setSaved(true);
-    } catch {
-      /* persist failed — keep local percent for retry */
-    }
   };
 
   const themeOptions = [
@@ -280,28 +252,6 @@ function ViewOptionsPanel({ settings, onSaveSettings }) {
         </p>
         <CalendarColorPalette value={accentColor} onChange={(color) => void handleAccentColorChange(color)} />
       </fieldset>
-
-      {shellControls && (
-        <div className="mt-8">
-          <h3 className="mb-3 text-[22px] font-normal text-gcal-heading">투명도</h3>
-          <p className="mb-4 text-sm text-gcal-muted">
-            바탕화면(벽지·아이콘)이 비치는 정도를 5% 단위로 조절합니다.
-          </p>
-          <div className="flex items-center gap-3">
-            <input
-              type="range"
-              min={5}
-              max={100}
-              step={5}
-              value={opacityPercent}
-              onChange={(e) => void handleOpacityChange(e.target.value)}
-              className="h-2 w-full max-w-xs cursor-pointer accent-gcal-blue"
-              aria-label="투명도"
-            />
-            <span className="w-12 shrink-0 text-sm tabular-nums text-gcal-body">{opacityPercent}%</span>
-          </div>
-        </div>
-      )}
 
       {shellControls && (
         <div className="mt-8">
