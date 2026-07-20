@@ -61,7 +61,7 @@ export default function SearchPanel({ open, events, calendars, tags = [], onClos
 
   return (
     <div
-      className="fixed inset-0 z-[55] flex flex-col bg-[rgba(32,33,36,0.28)]"
+      className="fixed inset-0 z-[55] flex flex-col"
       onClick={onClose}
       role="presentation"
     >

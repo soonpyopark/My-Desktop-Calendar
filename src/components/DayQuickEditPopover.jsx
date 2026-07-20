@@ -338,9 +338,12 @@ export default function DayQuickEditPopover({
       setTitle('');
       setDraftLinks([]);
       setDraftTagIds([]);
-      inputRef.current?.focus();
     } finally {
       setSaving(false);
+      // Input is disabled while `saving` — focus only works after React re-enables it.
+      window.setTimeout(() => {
+        inputRef.current?.focus({ preventScroll: true });
+      }, 0);
     }
   };
 
@@ -491,6 +494,8 @@ export default function DayQuickEditPopover({
               const isDragging = dragSeriesId === seriesId;
               const isDropTarget = dropSeriesId === seriesId && dragSeriesId && dragSeriesId !== seriesId;
               const displayTitle = label?.title || event.title || '';
+              const hasLinkOrAttach = getEventLinks(event).length > 0
+                || (Array.isArray(event.attachments) && event.attachments.length > 0);
               return (
                 <li
                   key={`${seriesId}-${resolvedDayKey}`}
@@ -589,8 +594,12 @@ export default function DayQuickEditPopover({
                     >
                       {displayTitle}
                     </span>
-                    <EventLinkIcon event={event} />
-                    <EventAttachIcon event={event} />
+                    {hasLinkOrAttach && (
+                      <span className="event-bar-trailing">
+                        <EventLinkIcon event={event} />
+                        <EventAttachIcon event={event} />
+                      </span>
+                    )}
                   </div>
                 </li>
               );

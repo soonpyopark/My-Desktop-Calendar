@@ -1,6 +1,9 @@
+import { getSeriesId } from '../../shared/eventOccurrences.js';
 import { getEventLinks } from '../../shared/eventLinks.js';
 import { resolveEventTags } from '../../shared/eventTags.js';
+import { openEventAttachment } from '../lib/api.js';
 import { formatEventPopoverSchedule, formatRepeatLabel } from '../lib/eventFormat.js';
+import { formatFileSize } from '../lib/formatFileSize.js';
 import { openExternalUrl } from '../lib/openExternal.js';
 import { cn } from '../lib/cn.js';
 import EventTagIcons from './EventTagIcons.jsx';
@@ -11,6 +14,8 @@ export default function EventDetailContent({ event, calendar, dayKey, tags = [] 
   const repeatLine = formatRepeatLabel(event);
   const description = event.description?.trim() ?? '';
   const links = getEventLinks(event);
+  const attachments = Array.isArray(event?.attachments) ? event.attachments : [];
+  const eventId = getSeriesId(event) || event?.id;
   const completed = Boolean(event.completed);
   const title = event.title ?? '';
   const eventTags = resolveEventTags(event, tags);
@@ -55,6 +60,34 @@ export default function EventDetailContent({ event, calendar, dayKey, tags = [] 
                   >
                     {item.title || item.url}
                   </a>
+                </li>
+              ))}
+            </ul>
+          )}
+          {attachments.length > 0 && (
+            <ul className="mt-1.5 m-0 list-none space-y-1 p-0" aria-label="첨부파일">
+              {attachments.map((item) => (
+                <li key={item.id} className="flex items-start gap-1.5 text-sm leading-relaxed">
+                  <svg viewBox="0 0 24 24" width="14" height="14" className="mt-0.5 shrink-0 text-gcal-muted" aria-hidden="true">
+                    <path
+                      fill="currentColor"
+                      d="M16.5 6.5v10.25a4.25 4.25 0 0 1-8.5 0V6.75a2.75 2.75 0 0 1 5.5 0v9.5a1.25 1.25 0 0 1-2.5 0V7.5H9.5v8.75a2.75 2.75 0 0 0 5.5 0V6.75a4.25 4.25 0 0 0-8.5 0v10a5.75 5.75 0 0 0 11.5 0V6.5h-1.5z"
+                    />
+                  </svg>
+                  <button
+                    type="button"
+                    className="min-w-0 break-all text-left text-gcal-blue hover:underline"
+                    title="첨부 파일 열기"
+                    onClick={() => {
+                      if (!eventId || !item?.id) return;
+                      void openEventAttachment(eventId, item.id);
+                    }}
+                  >
+                    {item.name || '(파일)'}
+                    {item.size != null ? (
+                      <span className="ml-1.5 text-xs text-gcal-muted">{formatFileSize(item.size)}</span>
+                    ) : null}
+                  </button>
                 </li>
               ))}
             </ul>

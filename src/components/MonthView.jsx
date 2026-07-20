@@ -25,6 +25,7 @@ import { buildWeekEventLayout } from '../lib/monthWeekLayout.js';
 import { DEFAULT_VIEW_OPTIONS, HOLIDAYS_KR_CALENDAR_ID } from '../../shared/constants.js';
 import { shouldShowWeekNumbers, getWeekStartsOn } from '../lib/viewOptions.js';
 import { isDesktopSurfaceHost, isNeutralinoDesktopShell } from '../lib/isNeutralinoDesktopShell.js';
+import { getEventLinks } from '../../shared/eventLinks.js';
 import { getSeriesId } from '../../shared/eventOccurrences.js';
 
 const WEEKS_BEFORE = 104;
@@ -56,11 +57,14 @@ const MonthWeekRow = memo(function MonthWeekRow({
   onEventMouseMove,
   onEventMouseLeave,
   onMoreOpen,
+  onMoreHoverStart,
   dayColors,
   interactive = true,
+  completedHidden = false,
 }) {
   const weekStart = week[0].date;
   const moreHoverTimerRef = useRef(null);
+  const eventClickTimerRef = useRef(null);
   const hostSurface = isDesktopSurfaceHost();
 
   const clearMoreHoverTimer = useCallback(() => {
@@ -70,7 +74,17 @@ const MonthWeekRow = memo(function MonthWeekRow({
     }
   }, []);
 
-  useEffect(() => () => clearMoreHoverTimer(), [clearMoreHoverTimer]);
+  const clearEventClickTimer = useCallback(() => {
+    if (eventClickTimerRef.current) {
+      window.clearTimeout(eventClickTimerRef.current);
+      eventClickTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => {
+    clearMoreHoverTimer();
+    clearEventClickTimer();
+  }, [clearEventClickTimer, clearMoreHoverTimer]);
 
   return (
     <div
@@ -92,11 +106,17 @@ const MonthWeekRow = memo(function MonthWeekRow({
           date.getDate(),
         );
         const daySegments = weekLayout[dayKey] ?? [];
-        const { visibleCount, hiddenEventCount } = resolveDayVisibleEventLimit(daySegments, eventCapacity);
         const sortedSegments = daySegments
           .slice()
-          .sort((a, b) => compareEventsForDayDisplay(a.event, b.event, dayKey));
-        const visibleSegments = sortedSegments.slice(0, visibleCount);
+          .sort((a, b) => (a.lane - b.lane) || compareEventsForDayDisplay(a.event, b.event, dayKey));
+        // Completed-hide: omit completed from capacity/더보기, but keep layout `lane` on
+        // remaining bars so they do not jump when the toggle flips (CSS also hides any
+        // completed that remain mounted in-range).
+        const uiSegments = completedHidden
+          ? sortedSegments.filter((segment) => !segment.event?.completed)
+          : sortedSegments;
+        const { visibleCount, hiddenEventCount } = resolveDayVisibleEventLimit(uiSegments, eventCapacity);
+        const visibleSegments = uiSegments.slice(0, visibleCount);
         const dayBg = dayColors?.[dayKey] || null;
 
         return (
@@ -117,7 +137,9 @@ const MonthWeekRow = memo(function MonthWeekRow({
               onDaySelect(date);
             } : undefined}
             onDoubleClick={interactive ? (event) => {
+              // Empty day cell (not an event bar) → quick-edit.
               event.preventDefault();
+              event.stopPropagation();
               onDayCreate?.(date, event.currentTarget.getBoundingClientRect());
             } : undefined}
             onKeyDown={interactive ? (e) => {
@@ -131,11 +153,13 @@ const MonthWeekRow = memo(function MonthWeekRow({
           >
             <DayNumber solar={solar} lunarLabel={lunar} lunarDay={lunarDay} solarTerm={solarTerm} />
             <div className="day-events">
-              {visibleSegments.map(({ event, segment, label, continuation }, displayLane) => {
+              {visibleSegments.map(({ event, segment, label, continuation, lane }) => {
                 const cal = calendarById.get(event.calendarId);
                 const color = cal?.color ?? '#f6bf26';
                 const theme = getCalendarTheme(color);
                 const accent = event.completed ? '#9aa0a6' : (theme.accent ?? theme.base);
+                const hasLinkOrAttach = getEventLinks(event).length > 0
+                  || (Array.isArray(event.attachments) && event.attachments.length > 0);
 
                 return (
                   <button
@@ -151,32 +175,49 @@ const MonthWeekRow = memo(function MonthWeekRow({
                       event.completed && 'is-completed',
                     )}
                     style={{
-                      '--event-lane': displayLane,
+                      // Prefer layout lane (stable across completed-hide) over list index.
+                      '--event-lane': Number.isFinite(lane) ? lane : 0,
                       '--event-accent': accent,
                       backgroundColor: event.completed ? 'transparent' : theme.bg,
                       color: event.completed ? '#80868b' : theme.text,
                     }}
                     onMouseEnter={(e) => {
-                      if (hostSurface) return;
+                      // Read-only hover preview — same real-click passthrough as onContextMenu
+                      // below, so this is safe on the desktop Host surface too (unlike onClick,
+                      // it doesn't conflict with the native dblclick-zone create/edit model).
                       onEventMouseEnter?.(event, dayKey, e.currentTarget, e.clientX, e.clientY);
                     }}
                     onMouseMove={(e) => {
-                      if (hostSurface) return;
                       onEventMouseMove?.(e.clientX, e.clientY);
                     }}
                     onMouseLeave={() => {
-                      if (hostSurface) return;
                       onEventMouseLeave?.();
                     }}
                     onClick={(e) => {
                       e.stopPropagation();
-                      // Desktop wallpaper: single-click does nothing (dblclick → quick-edit via native zones).
+                      // Desktop wallpaper: single-click does nothing (dblclick → full editor).
                       if (hostSurface) return;
-                      onEventSelect(event, e.clientX, e.clientY, dayKey);
+                      // Defer single-click so a following dblclick can cancel quick-edit.
+                      const { clientX, clientY } = e;
+                      clearEventClickTimer();
+                      eventClickTimerRef.current = window.setTimeout(() => {
+                        eventClickTimerRef.current = null;
+                        onEventSelect(event, clientX, clientY, dayKey);
+                      }, 250);
+                    }}
+                    onDoubleClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      if (!interactive) return;
+                      clearEventClickTimer();
+                      clearMoreHoverTimer();
+                      if (event.calendarId === HOLIDAYS_KR_CALENDAR_ID) return;
+                      onEventEdit?.(event, dayKey);
                     }}
                     onContextMenu={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
+                      clearEventClickTimer();
                       (onEventDetail ?? onEventSelect)(event, e.clientX, e.clientY, dayKey);
                     }}
                   >
@@ -199,8 +240,12 @@ const MonthWeekRow = memo(function MonthWeekRow({
                         </span>
                       </span>
                     )}
-                    <EventLinkIcon event={event} />
-                    <EventAttachIcon event={event} />
+                    {hasLinkOrAttach && (
+                      <span className="event-bar-trailing">
+                        <EventLinkIcon event={event} />
+                        <EventAttachIcon event={event} />
+                      </span>
+                    )}
                   </button>
                 );
               })}
@@ -226,8 +271,12 @@ const MonthWeekRow = memo(function MonthWeekRow({
                     onDayCreate?.(date, e.currentTarget.closest('.day-cell')?.getBoundingClientRect() ?? e.currentTarget.getBoundingClientRect());
                   }}
                   onMouseEnter={(e) => {
-                    // Window: hover opens the day-events list. Desktop: no overlay on Host.
-                    if (!interactive || hostSurface) return;
+                    // Hover opens the day-events list — same in-place overlay pattern as the
+                    // event-bar hover preview, so this runs on the desktop Host surface too.
+                    if (!interactive) return;
+                    // Drop any open event-bar detail immediately so "더보기" isn't covered
+                    // and the list can take over on the first hover.
+                    onMoreHoverStart?.();
                     const rect = e.currentTarget.getBoundingClientRect();
                     clearMoreHoverTimer();
                     moreHoverTimerRef.current = window.setTimeout(() => {
@@ -258,6 +307,7 @@ export default function MonthView({
   onEventClick,
   onEventDetail,
   onEventHover,
+  onCloseEventDetail,
   onEventEdit,
   onVisibleMonthChange,
   onVisibleWeekChange,
@@ -266,6 +316,9 @@ export default function MonthView({
   wheelLocked = false,
   dayColors = {},
   interactive = true,
+  editorOpen = false,
+  eventsHidden = false,
+  completedHidden = false,
 }) {
   const weekStartsOn = getWeekStartsOn(viewOptions);
   const showWeekNumbers = shouldShowWeekNumbers(viewOptions);
@@ -339,6 +392,16 @@ export default function MonthView({
     },
   });
   const [expandedDay, setExpandedDay] = useState(null);
+
+  // Full EventEditor takes over — dismiss the day "더보기" list underneath.
+  useEffect(() => {
+    if (editorOpen) setExpandedDay(null);
+  }, [editorOpen]);
+
+  // Hide toggles — drop the day list so it cannot show stale completed/all events.
+  useEffect(() => {
+    if (eventsHidden || completedHidden) setExpandedDay(null);
+  }, [completedHidden, eventsHidden]);
 
   const {
     setWeekRef,
@@ -476,13 +539,22 @@ export default function MonthView({
     if (!interactive) return;
     clearHoverPreview();
     setExpandedDay(null);
+    onCloseEventDetail?.();
     onSelectDate?.(date);
-    if (anchorRect) {
-      onDayQuickEdit?.(date, anchorRect);
+    // Always quick-edit for day-cell / 더보기 double-click (full editor is event-bar dblclick).
+    if (onDayQuickEdit) {
+      onDayQuickEdit(date, anchorRect);
       return;
     }
-    (onCreateDate ?? onSelectDate)?.(date);
-  }, [clearHoverPreview, interactive, onCreateDate, onDayQuickEdit, onSelectDate]);
+    onCreateDate?.(date);
+  }, [
+    clearHoverPreview,
+    interactive,
+    onCloseEventDetail,
+    onCreateDate,
+    onDayQuickEdit,
+    onSelectDate,
+  ]);
 
   const handleEventSelect = useCallback((event, clientX, clientY, dayKey) => {
     // Window: single-click → quick-edit. DesktopHost skips click earlier.
@@ -503,22 +575,45 @@ export default function MonthView({
     onEventEdit?.(event, dayKey);
   }, [clearHoverPreview, interactive, onEventEdit]);
 
-  const handleMoreOpen = useCallback((date, dayKey, daySegments) => {
-    if (!interactive || isDesktopSurfaceHost()) return;
+  const handleMoreHoverStart = useCallback(() => {
     clearHoverPreview();
+    onCloseEventDetail?.();
+  }, [clearHoverPreview, onCloseEventDetail]);
+
+  const closeExpandedDay = useCallback(() => {
+    setExpandedDay(null);
+  }, []);
+
+  const handleMoreOpen = useCallback((date, dayKey, daySegments) => {
+    if (!interactive) return;
+    clearHoverPreview();
+    onCloseEventDetail?.();
     const dayEvents = daySegments
       .slice()
       .sort((a, b) => compareEventsForDayDisplay(a.event, b.event, dayKey))
-      .map((segment) => segment.event);
+      .map((segment) => segment.event)
+      .filter((event) => !(completedHidden && event?.completed));
     const cell = document.querySelector(`.day-cell[data-date-key="${dayKey}"]`);
+    const cellRect = cell?.getBoundingClientRect?.() ?? null;
     // "N개 더보기" hover opens the day-events list; click opens quick-edit instead.
     setExpandedDay({
       date,
       dayKey,
       events: buildDayDisplayEvents(dayEvents, dayKey, tags),
-      anchorRect: cell?.getBoundingClientRect?.() ?? null,
+      anchorRect: cellRect
+        ? {
+            top: cellRect.top,
+            left: cellRect.left,
+            right: cellRect.right,
+            bottom: cellRect.bottom,
+            width: cellRect.width,
+            height: cellRect.height,
+            x: cellRect.x,
+            y: cellRect.y,
+          }
+        : null,
     });
-  }, [clearHoverPreview, interactive, tags]);
+  }, [clearHoverPreview, completedHidden, interactive, onCloseEventDetail, tags]);
 
   const reportInteractionZones = useCallback(() => {
     if (!interactive || !isNeutralinoDesktopShell() || !window.myCalendar?.setCreateEventZones) {
@@ -578,6 +673,11 @@ export default function MonthView({
     if (!window.myCalendar?.setEditEventZones) {
       return;
     }
+    // Bars stay mounted (CSS-hidden) while eventsHidden — never hit-test them.
+    if (eventsHidden) {
+      void window.myCalendar.clearEditEventZones();
+      return;
+    }
     // Native hit-testing picks whichever zone rect contains the click, in DOM order — an event
     // bar's own rect must never extend past its own day cell (e.g. the 1px connector overlap on
     // --start/--middle segments, or a rect captured mid-reflow) or a click that looks like it's
@@ -586,6 +686,7 @@ export default function MonthView({
     /** @type {Array<{ left: number, top: number, width: number, height: number, eventId: string, dayKey: string }>} */
     const editRects = [];
     for (const el of body.querySelectorAll('.event-bar[data-event-id][data-day-key][data-editable="1"]')) {
+      if (completedHidden && el.classList.contains('is-completed')) continue;
       const eventId = el.getAttribute('data-event-id');
       const dayKey = el.getAttribute('data-day-key');
       if (!eventId || !dayKey) continue;
@@ -619,7 +720,7 @@ export default function MonthView({
     void window.myCalendar.setEditEventZones(
       editRects.length ? { clientRects: editRects } : null,
     );
-  }, [interactive]);
+  }, [completedHidden, eventsHidden, interactive]);
 
   useEffect(() => {
     if (!interactive || !isNeutralinoDesktopShell() || !window.myCalendar?.setCreateEventZones) {
@@ -704,11 +805,16 @@ export default function MonthView({
       void window.myCalendar?.clearCreateEventZones?.();
       void window.myCalendar?.clearEditEventZones?.();
     };
-  }, [interactive, reportInteractionZones, viewDate, weeksInViewport, displayMonth, displayYear, events]);
+  }, [completedHidden, eventsHidden, interactive, reportInteractionZones, viewDate, weeksInViewport, displayMonth, displayYear, events]);
 
   return (
     <div
-      className={cn('month-view', !showWeekNumbers && 'hide-week-numbers')}
+      className={cn(
+        'month-view',
+        !showWeekNumbers && 'hide-week-numbers',
+        eventsHidden && 'is-events-hidden',
+        completedHidden && 'is-completed-hidden',
+      )}
       style={{ '--weeks-in-viewport': effectiveWeeksInViewport, ...eventLayoutCssVars }}
     >
       <div className="month-weekdays">
@@ -747,7 +853,9 @@ export default function MonthView({
               onEventMouseMove={handleEventMouseMove}
               onEventMouseLeave={handleEventMouseLeave}
               onMoreOpen={handleMoreOpen}
+              onMoreHoverStart={handleMoreHoverStart}
               dayColors={dayColors}
+              completedHidden={completedHidden}
             />
           );
         })}
@@ -761,15 +869,21 @@ export default function MonthView({
           calendars={calendars}
           tags={tags}
           anchorRect={expandedDay.anchorRect}
-          onClose={() => setExpandedDay(null)}
-          onEventHover={(event, clientX, clientY) => {
-            // List-row hover → read-only detail (same as schedule-bar hover).
-            (onEventHover ?? onEventDetail)?.(event, clientX, clientY, expandedDay.dayKey);
+          onClose={closeExpandedDay}
+          onEventHover={(event, clientX, clientY, _dayKey, anchorRect) => {
+            // List-row hover → read-only detail (list stays open; detail paints above).
+            (onEventHover ?? onEventDetail)?.(
+              event,
+              clientX,
+              clientY,
+              expandedDay.dayKey,
+              anchorRect,
+            );
           }}
           onEventClick={(event) => {
             // List-row double-click → quick-edit focused on that event (closes the list —
             // we're navigating away from it into the editor).
-            setExpandedDay(null);
+            closeExpandedDay();
             clearHoverPreview();
             if (onEventEdit) {
               onEventEdit(event, expandedDay.dayKey);
@@ -777,9 +891,13 @@ export default function MonthView({
             }
             onEventClick?.(event, 0, 0, expandedDay.dayKey);
           }}
-          onEventDetail={onEventDetail ? (event, clientX, clientY) => {
+          onEventDetail={onEventDetail ? (event, clientX, clientY, _dayKey, anchorRect) => {
             // List-row single-click → read-only detail popover. Keep the list open behind
             // it (same click-through-to-swap pattern as the main grid's EventPopover).
+            if (anchorRect) {
+              onEventDetail(event, clientX, clientY, expandedDay.dayKey, anchorRect);
+              return;
+            }
             handleEventDetail(event, clientX, clientY, expandedDay.dayKey);
           } : undefined}
         />

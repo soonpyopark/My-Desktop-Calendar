@@ -50,16 +50,16 @@ import { isNativeHost, onNativeEvent } from './lib/nativeHost.js';
 import { isDesktopSurfaceHost, isNeutralinoDesktopShell } from './lib/isNeutralinoDesktopShell.js';
 import { DEFAULT_SETTINGS, DEFAULT_VIEW_OPTIONS, HOLIDAYS_KR_CALENDAR_ID } from '../shared/constants.js';
 
+// hide/show-events and hide/show-completed are intentionally absent — they're
+// persisted settings that already reach this surface via the store-updated
+// broadcast (see Header.jsx's STORE_SYNCED_UI_ACTIONS), so Header no longer sends
+// them as a chrome-nav mirror at all.
 const HOST_CHROME_NAV_ACTIONS = new Set([
   'prev',
   'next',
   'today',
   'prev-year',
   'next-year',
-  'hide-events',
-  'show-events',
-  'hide-completed',
-  'show-completed',
   'open-web',
   'view-mode',
   'view-month',
@@ -257,33 +257,85 @@ export default function App() {
 
   const storeThemeRef = useRef(store);
   storeThemeRef.current = store;
+  /** Local UI override so the eye/checkbox flip on the first click (store PATCH can lag). */
+  const eventsHiddenOverrideRef = useRef(null);
+  const completedHiddenOverrideRef = useRef(null);
+  const [eventsHiddenOverride, setEventsHiddenOverride] = useState(null);
+  const [completedHiddenOverride, setCompletedHiddenOverride] = useState(null);
+  const eventsHideToggleLockRef = useRef(0);
+  const completedHideToggleLockRef = useRef(0);
 
   const applyEventsHidden = useCallback((hidden) => {
     if (!isLoggedIn) return;
     const next = Boolean(hidden);
-    if (Boolean(storeThemeRef.current?.settings?.viewOptions?.eventsHidden) === next) {
+    const shown = eventsHiddenOverrideRef.current
+      ?? Boolean(storeThemeRef.current?.settings?.viewOptions?.eventsHidden);
+    if (shown === next) {
       return;
+    }
+    eventsHiddenOverrideRef.current = next;
+    setEventsHiddenOverride(next);
+    const current = storeThemeRef.current;
+    if (current?.settings) {
+      storeThemeRef.current = {
+        ...current,
+        settings: {
+          ...current.settings,
+          viewOptions: {
+            ...current.settings.viewOptions,
+            eventsHidden: next,
+          },
+        },
+      };
     }
     void updateSettings({ viewOptions: { eventsHidden: next } });
   }, [isLoggedIn, updateSettings]);
 
   const handleToggleEventsHidden = useCallback(() => {
     if (!isLoggedIn) return;
-    applyEventsHidden(!Boolean(storeThemeRef.current?.settings?.viewOptions?.eventsHidden));
+    // Duplicate pointer/click (or zone+DOM) within one gesture must not invert twice.
+    const now = Date.now();
+    if (now - eventsHideToggleLockRef.current < 350) return;
+    eventsHideToggleLockRef.current = now;
+    const current = eventsHiddenOverrideRef.current
+      ?? Boolean(storeThemeRef.current?.settings?.viewOptions?.eventsHidden);
+    applyEventsHidden(!current);
   }, [applyEventsHidden, isLoggedIn]);
 
   const applyCompletedHidden = useCallback((hidden) => {
     if (!isLoggedIn) return;
     const next = Boolean(hidden);
-    if (Boolean(storeThemeRef.current?.settings?.viewOptions?.completedHidden) === next) {
+    const shown = completedHiddenOverrideRef.current
+      ?? Boolean(storeThemeRef.current?.settings?.viewOptions?.completedHidden);
+    if (shown === next) {
       return;
+    }
+    completedHiddenOverrideRef.current = next;
+    setCompletedHiddenOverride(next);
+    const current = storeThemeRef.current;
+    if (current?.settings) {
+      storeThemeRef.current = {
+        ...current,
+        settings: {
+          ...current.settings,
+          viewOptions: {
+            ...current.settings.viewOptions,
+            completedHidden: next,
+          },
+        },
+      };
     }
     void updateSettings({ viewOptions: { completedHidden: next } });
   }, [isLoggedIn, updateSettings]);
 
   const handleToggleCompletedHidden = useCallback(() => {
     if (!isLoggedIn) return;
-    applyCompletedHidden(!Boolean(storeThemeRef.current?.settings?.viewOptions?.completedHidden));
+    const now = Date.now();
+    if (now - completedHideToggleLockRef.current < 350) return;
+    completedHideToggleLockRef.current = now;
+    const current = completedHiddenOverrideRef.current
+      ?? Boolean(storeThemeRef.current?.settings?.viewOptions?.completedHidden);
+    applyCompletedHidden(!current);
   }, [applyCompletedHidden, isLoggedIn]);
 
   const assertCurrentColorScheme = useCallback(() => {
@@ -303,11 +355,14 @@ export default function App() {
   }, []);
 
   const openSearch = useCallback(() => {
-    if (isDesktopSurfaceHost() || settingsOpen) {
+    if (settingsOpen) {
       return;
     }
-    // Suspend is done by Header withUiSuspend / Host pendingUiAction — do not call twice
-    // (double SuspendDesktopForUi flashes the transition cover).
+    // Reachable on the DesktopHost surface too — Header's own onClick calls this
+    // directly (no native unlock) under SysListView32/WS_POPUP embed, opening the
+    // panel in place exactly like Settings/the quick-edit popover. The old permanent
+    // isDesktopSurfaceHost() guard here only made sense back when Search always had
+    // to unlock/undock to the App window first.
     assertCurrentColorScheme();
     setSearchOpen(true);
   }, [assertCurrentColorScheme, settingsOpen]);
@@ -320,9 +375,11 @@ export default function App() {
       } catch {
         /* ignore */
       }
-      // Search uses a permanent unlock (launchMode=window); do not re-embed on close.
+      // Same as closeSettings — a no-op unless a legacy/boot-flow path (not this
+      // surface's own in-place open) actually suspended for it.
+      void resumeDesktopEmbedAfterPaint();
     })();
-  }, []);
+  }, [resumeDesktopEmbedAfterPaint]);
 
   const openSettings = useCallback(() => {
     if (!isLoggedIn || searchOpen) {
@@ -461,28 +518,29 @@ export default function App() {
     setViewDate(weekStart);
   }, []);
 
-  const openDayQuickEdit = useCallback((date, anchorRect, { focusEvent = null } = {}) => {
-    if (!isLoggedIn) return;
-    setSelectedDate(date);
-    setActiveEvent(null);
-    setActiveEventDay(null);
-    setPopoverAnchor(null);
-    setEditorOpen(false);
-    setEditorEvent(null);
-    setQuickEdit({
-      date,
-      dayKey: toDateKey(date),
-      anchorRect,
-      focusEvent,
-    });
-  }, [isLoggedIn]);
+  const snapshotAnchorRect = useCallback((rect) => {
+    if (!rect) return null;
+    const width = Number(rect.width) || 0;
+    const height = Number(rect.height) || 0;
+    if (!(width > 0 && height > 0)) return null;
+    return {
+      top: rect.top,
+      left: rect.left,
+      right: rect.right,
+      bottom: rect.bottom,
+      width,
+      height,
+      x: rect.x ?? rect.left,
+      y: rect.y ?? rect.top,
+    };
+  }, []);
 
   const resolveDayQuickEditRect = useCallback((date) => {
     const dayKey = toDateKey(date);
     const el = document.querySelector(`.day-cell[data-date-key="${dayKey}"]`);
     if (el) {
-      const rect = el.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) return rect;
+      const rect = snapshotAnchorRect(el.getBoundingClientRect());
+      if (rect) return rect;
     }
     const width = 300;
     const height = viewMode === 'month' ? 388 : 292;
@@ -498,7 +556,25 @@ export default function App() {
       right: left + width,
       bottom: top + height,
     };
-  }, [viewMode]);
+  }, [snapshotAnchorRect, viewMode]);
+
+  /** Day-cell double-click / 더보기 → quick-edit (not the full EventEditor). */
+  const openDayQuickEdit = useCallback((date, anchorRect, { focusEvent = null } = {}) => {
+    if (!isLoggedIn) return;
+    setSelectedDate(date);
+    setActiveEvent(null);
+    setActiveEventDay(null);
+    setPopoverAnchor(null);
+    setEditorOpen(false);
+    setEditorEvent(null);
+    setQuickEdit({
+      date,
+      dayKey: toDateKey(date),
+      // Snapshot — live DOMRect can go stale before the popover measures layout.
+      anchorRect: snapshotAnchorRect(anchorRect) ?? resolveDayQuickEditRect(date),
+      focusEvent,
+    });
+  }, [isLoggedIn, resolveDayQuickEditRect, snapshotAnchorRect]);
 
   const stashQuickEditReturn = useCallback((fallbackDate, focusEvent = null) => {
     const current = quickEditRef.current;
@@ -615,7 +691,7 @@ export default function App() {
     setPendingEdit(null);
     setScopeDialog((prev) => (prev?.mode === 'edit' ? null : prev));
 
-    // Quick-edit → 더보기 → close: restore the small editor (stay unlocked).
+    // Quick-edit → 더보기 → X/취소: restore the small editor (stay unlocked).
     if (fromQuickEdit) {
       restoreQuickEditFromReturn();
       return;
@@ -623,6 +699,17 @@ export default function App() {
 
     void resumeDesktopEmbedAfterPaint();
   }, [restoreQuickEditFromReturn, resumeDesktopEmbedAfterPaint]);
+
+  /** Save finished the edit flow — close detail editor and do not reopen quick-edit. */
+  const dismissEditorAfterSave = useCallback(() => {
+    editorOpenedFromQuickEditRef.current = false;
+    quickEditReturnRef.current = null;
+    setEditorOpen(false);
+    setEditorEvent(null);
+    setPendingEdit(null);
+    setScopeDialog((prev) => (prev?.mode === 'edit' ? null : prev));
+    void resumeDesktopEmbedAfterPaint();
+  }, [resumeDesktopEmbedAfterPaint]);
 
   const findMasterEvent = useCallback((eventOrId) => {
     const seriesId = typeof eventOrId === 'string' ? eventOrId : getSeriesId(eventOrId);
@@ -772,7 +859,8 @@ export default function App() {
         void resumeDesktopEmbedIfNeeded();
         return;
       }
-      openDayQuickEditForEvent(event, dayKey);
+      // Desktop (zone) bar double-click → full EventEditor.
+      openEditEvent(event, dayKey, { fromQuickEdit: false });
     };
 
     const openFromPendingUi = async (action, token) => {
@@ -854,7 +942,7 @@ export default function App() {
     editorOpen,
     isLoggedIn,
     openDayQuickEditForDate,
-    openDayQuickEditForEvent,
+    openEditEvent,
     quickEdit,
     resumeDesktopEmbedIfNeeded,
     store?.events,
@@ -922,8 +1010,10 @@ export default function App() {
       }
       try {
         if (!payload.id) {
+          // Close on save click — don't wait for the network round-trip, and don't
+          // restore the quick-edit underneath (X/cancel still uses closeEditor).
+          dismissEditorAfterSave();
           await addEvent(payload);
-          closeEditor();
           return;
         }
 
@@ -933,13 +1023,13 @@ export default function App() {
           return;
         }
 
+        dismissEditorAfterSave();
         await editEvent(payload.id, payload);
-        closeEditor();
       } catch (err) {
         await alert(err instanceof Error ? err.message : '일정을 저장하지 못했습니다.');
       }
     },
-    [addEvent, alert, closeEditor, editEvent, isLoggedIn, pendingEdit],
+    [addEvent, alert, dismissEditorAfterSave, editEvent, isLoggedIn, pendingEdit],
   );
 
   const handleDeleteRequest = useCallback(async (event, options = {}) => {
@@ -993,13 +1083,11 @@ export default function App() {
 
     try {
       if (dialogMode === 'edit' && pendingEdit?.payload && pendingEdit?.master) {
-        await applyRecurringEdit(
-          pendingEdit.master,
-          pendingEdit.payload,
-          pendingEdit.occurrenceDate,
-          scope,
-        );
-        closeEditor();
+        const master = pendingEdit.master;
+        const editPayload = pendingEdit.payload;
+        const occurrenceDate = pendingEdit.occurrenceDate;
+        dismissEditorAfterSave();
+        await applyRecurringEdit(master, editPayload, occurrenceDate, scope);
         return;
       }
 
@@ -1058,6 +1146,7 @@ export default function App() {
     alert,
     applyRecurringEdit,
     closeEditor,
+    dismissEditorAfterSave,
     editEvent,
     pendingComplete,
     pendingDelete,
@@ -1085,9 +1174,8 @@ export default function App() {
   }, [clearHistory, logout, refresh]);
 
   const handleAuthToggle = useCallback(() => {
-    if (isDesktopSurfaceHost()) {
-      return;
-    }
+    // Reachable on the DesktopHost surface too — see openSearch/openSettings above for
+    // why the old isDesktopSurfaceHost() guard here is gone.
     if (isLoggedIn) {
       handleLogout();
       return;
@@ -1199,18 +1287,10 @@ export default function App() {
       case 'today':
         goToday();
         return;
-      case 'hide-events':
-        applyEventsHidden(true);
-        return;
-      case 'show-events':
-        applyEventsHidden(false);
-        return;
-      case 'hide-completed':
-        applyCompletedHidden(true);
-        return;
-      case 'show-completed':
-        applyCompletedHidden(false);
-        return;
+      // hide/show-events and hide/show-completed used to have cases here too, mirrored
+      // from Header's chrome-nav path — removed along with that mirror (see
+      // HOST_CHROME_NAV_ACTIONS above): applyEventsHidden/applyCompletedHidden already
+      // reach this surface via the settings store broadcast.
       case 'open-web': {
         const port = Number(syncInfo?.port) || 0;
         if ((syncInfo?.running ?? syncInfo?.serverRunning) && port > 0) {
@@ -1265,8 +1345,32 @@ export default function App() {
   }, [activeEvent, calendars, isLoggedIn]);
 
   const viewOptions = { ...DEFAULT_VIEW_OPTIONS, ...store?.settings?.viewOptions };
-  const eventsHidden = viewOptions.eventsHidden === true;
-  const completedHidden = viewOptions.completedHidden === true;
+  const storeEventsHidden = viewOptions.eventsHidden === true;
+  const storeCompletedHidden = viewOptions.completedHidden === true;
+  const eventsHidden = eventsHiddenOverride ?? storeEventsHidden;
+  const completedHidden = completedHiddenOverride ?? storeCompletedHidden;
+
+  // Drop local overrides only after the store matches for a short settle — avoids one
+  // paint where override clears while a racing store still has the previous flag.
+  useEffect(() => {
+    if (eventsHiddenOverride === null) return;
+    if (storeEventsHidden !== eventsHiddenOverride) return;
+    const id = window.setTimeout(() => {
+      eventsHiddenOverrideRef.current = null;
+      setEventsHiddenOverride(null);
+    }, 400);
+    return () => window.clearTimeout(id);
+  }, [storeEventsHidden, eventsHiddenOverride]);
+
+  useEffect(() => {
+    if (completedHiddenOverride === null) return;
+    if (storeCompletedHidden !== completedHiddenOverride) return;
+    const id = window.setTimeout(() => {
+      completedHiddenOverrideRef.current = null;
+      setCompletedHiddenOverride(null);
+    }, 400);
+    return () => window.clearTimeout(id);
+  }, [storeCompletedHidden, completedHiddenOverride]);
 
   useEffect(() => {
     if (!eventsHidden) return;
@@ -1392,11 +1496,10 @@ export default function App() {
   // Settings still receives the full `calendars` list so hidden ones can be re-shown.
   const viewableCalendars = filterCalendarsForViewer(calendars, false);
   const viewableEvents = filterEventsForViewer(events, calendars, false);
-  const incompleteEvents = completedHidden
-    ? viewableEvents.filter((event) => !event.completed)
-    : viewableEvents;
-  const displayEvents = eventsHidden ? [] : incompleteEvents;
-  const displayDayColors = eventsHidden ? {} : (store?.settings?.dayColors ?? {});
+  // Keep events mounted for both hide toggles — MonthView hides via CSS / stable lanes
+  // so the grid does not remount/flicker on toggle.
+  const displayEvents = viewableEvents;
+  const displayDayColors = store?.settings?.dayColors ?? {};
   const ownerName = store?.settings?.ownerName ?? DEFAULT_SETTINGS.ownerName;
   const weekStartsOn = getWeekStartsOn(viewOptions);
   const popoverEvent = isEventVisibleToViewer(activeEvent, calendars, false) ? activeEvent : null;
@@ -1493,35 +1596,46 @@ export default function App() {
             monthAlign={monthAlign}
             weeksInViewport={weeksInViewport}
             interactive={isLoggedIn}
+            editorOpen={editorOpen}
+            eventsHidden={eventsHidden}
+            completedHidden={completedHidden}
             onVisibleMonthChange={handleVisibleMonthChange}
             onVisibleWeekChange={handleVisibleWeekChange}
             onSelectDate={(date) => setSelectedDate(date)}
             onDayQuickEdit={openDayQuickEdit}
             onCreateDate={(date) => openDayQuickEditForDate(date)}
             onEventClick={(event, _clientX, _clientY, dayKey) => {
-              // Window: schedule-bar click → quick-edit. DesktopHost ignores click (zones).
+              // Window: schedule-bar single-click → quick-edit. DesktopHost ignores click.
               if (isDesktopSurfaceHost()) return;
               openDayQuickEditForEvent(event, dayKey);
             }}
-            onEventHover={(event, clientX, clientY, dayKey) => {
-              // Window: schedule-bar / 더보기-list hover → read-only detail.
-              if (isDesktopSurfaceHost()) return;
+            onEventHover={(event, clientX, clientY, dayKey, anchorRect) => {
+              // Schedule-bar / 더보기-list hover → read-only detail.
+              // Reachable on DesktopHost too — same in-place overlay as right-click
+              // detail below (no unlock needed; Host already paints overlays).
               if (!isEventVisibleToViewer(event, calendars, false)) return;
               if (quickEdit || editorOpen) return;
               setActiveEvent(event);
               setActiveEventDay(dayKey);
-              setPopoverAnchor({ x: clientX, y: clientY });
+              setPopoverAnchor(anchorRect ?? { x: clientX, y: clientY });
             }}
-            onEventDetail={(event, clientX, clientY, dayKey) => {
+            onEventDetail={(event, clientX, clientY, dayKey, anchorRect) => {
               // Right-click detail (window + DesktopHost without unlock).
               if (!isEventVisibleToViewer(event, calendars, false)) return;
               if (quickEdit || editorOpen) return;
               setActiveEvent(event);
               setActiveEventDay(dayKey);
-              setPopoverAnchor({ x: clientX, y: clientY });
+              setPopoverAnchor(anchorRect ?? { x: clientX, y: clientY });
+            }}
+            onCloseEventDetail={() => {
+              // "더보기" hover takes over — close bar detail so the day list can open cleanly.
+              setActiveEvent(null);
+              setActiveEventDay(null);
+              setPopoverAnchor(null);
             }}
             onEventEdit={(event, dayKey) => {
-              openDayQuickEditForEvent(event, dayKey);
+              // Bar / list-row double-click → full EventEditor.
+              openEditEvent(event, dayKey, { fromQuickEdit: false });
             }}
             wheelLocked={settingsOpen || searchOpen || Boolean(quickEdit)}
           />
@@ -1670,22 +1784,23 @@ export default function App() {
               await alert(err instanceof Error ? err.message : '파일을 첨부하지 못했습니다.');
             }
           }}
-          onDayColorChange={async (color) => {
+          onDayColorChange={(color) => {
             if (!isLoggedIn) {
-              await alert('로그인 후 날짜 배경 색상을 변경할 수 있습니다.');
+              void alert('로그인 후 날짜 배경 색상을 변경할 수 있습니다.');
               return;
             }
-            const current = { ...(store?.settings?.dayColors ?? {}) };
+            const dayKey = quickEdit.dayKey;
+            const current = { ...(storeThemeRef.current?.settings?.dayColors ?? {}) };
             if (color) {
-              current[quickEdit.dayKey] = color;
+              current[dayKey] = color;
             } else {
-              delete current[quickEdit.dayKey];
+              delete current[dayKey];
             }
-            try {
-              await updateSettings({ dayColors: current });
-            } catch (err) {
-              await alert(err instanceof Error ? err.message : '날짜 색상을 저장하지 못했습니다.');
-            }
+            // Fire-and-forget: updateSettings already applies dayColors optimistically
+            // so the cell/trigger update on the double-click frame, not after PATCH.
+            void updateSettings({ dayColors: current }).catch((err) => {
+              void alert(err instanceof Error ? err.message : '날짜 색상을 저장하지 못했습니다.');
+            });
           }}
           onOpenMore={(date, selectedEvent) => {
             if (
@@ -1727,7 +1842,8 @@ export default function App() {
           setPopoverAnchor(null);
         }}
         onEdit={(event) => {
-          openDayQuickEditForEvent(event, activeEventDay);
+          // Detail pencil → full EventEditor (not quick-edit). Closes detail + day list.
+          openEditEvent(event, activeEventDay, { fromQuickEdit: false });
         }}
         onDelete={handleDeleteRequest}
         onToggleCompleted={async (event, completed) => {

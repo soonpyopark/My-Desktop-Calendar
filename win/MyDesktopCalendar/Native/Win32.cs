@@ -11,6 +11,8 @@ internal static class Win32
     public const int WS_CHILD = 0x40000000;
     public const int WS_POPUP = unchecked((int)0x80000000);
     public const int WS_VISIBLE = 0x10000000;
+    public const int WS_CLIPSIBLINGS = 0x04000000;
+    public const int WS_CLIPCHILDREN = 0x02000000;
     public const int WS_CAPTION = 0x00C00000;
     public const int WS_THICKFRAME = 0x00040000;
     public const int WS_SYSMENU = 0x00080000;
@@ -60,9 +62,8 @@ internal static class Win32
 
     /// <summary>
     /// Cloaks/uncloaks a window from DWM composition without hiding/showing it.
-    /// The window (and any WebView2 inside it) keeps rendering while cloaked —
-    /// toggling this is a single atomic DWM step with no repaint, unlike Show/Hide.
-    /// Only the owning process (or the shell) may set this on a window it owns.
+    /// DWM still composites the HWND; App WebView memory is rested separately via
+    /// <c>WebViewSurfaceMemory</c> while cloaked. Only the owning process may set this.
     /// </summary>
     public const int DWMWA_CLOAK = 13;
 

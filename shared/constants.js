@@ -146,7 +146,7 @@ export const DEFAULT_WIDGET_SETTINGS = {
   launchMode: WIDGET_LAUNCH_MODE.DESKTOP,
   enabled: true,
   alwaysOnTop: false,
-  /** @deprecated Window transparency removed; kept for settings.json compat. */
+  /** Main window layered alpha (0.05–1.0, 5% steps). */
   opacity: 1,
   /** Unused — both modes use the in-app custom title bar (kept for settings compat). */
   chromeTopInset: 0,

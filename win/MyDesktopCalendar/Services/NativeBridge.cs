@@ -38,16 +38,8 @@ internal sealed class NativeBridge
     private string? _currentUsername;
     private bool _currentRemember;
 
-    private bool _embedSuspended;
-    private string? _pendingCreateDate;
-    private string? _pendingEditEventId;
-    private string? _pendingEditDayKey;
-    private string? _pendingUiAction;
-    /// <summary>Surface ("desktop"/"app") whose onClick raised the pending chrome-nav
-    /// action — lets NotifyWidgetStatus skip echoing it back to that same surface under
-    /// native click passthrough (see SuspendForUi / IsPopupStyleEmbed).</summary>
-    private string? _pendingUiActionSurface;
-    private long _suspendToken;
+    /// <summary>Suspend/pending-reopen state for the App overlay — see <see cref="DesktopSurfaceState"/>.</summary>
+    private readonly DesktopSurfaceState _surfaceState = new();
     /// <summary>Last applied frame theme; skip redundant Apply to avoid window-mode flash.</summary>
     private bool? _frameThemeDark;
 
@@ -91,6 +83,7 @@ internal sealed class NativeBridge
 
     public void Attach(WebView2 webView)
     {
+        DetachPrimary();
         _webView = webView;
         webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
         webView.CoreWebView2.NavigationCompleted += (_, args) =>
@@ -108,8 +101,47 @@ internal sealed class NativeBridge
     /// <summary>DesktopHost WebView — shares store events; keeps zones in sync while host is visible.</summary>
     public void AttachSecondary(WebView2 webView)
     {
+        DetachSecondary();
         _secondaryWebView = webView;
         webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
+    }
+
+    public void DetachPrimary()
+    {
+        try
+        {
+            if (WebView2Safe.TryGetCore(_webView) is { } core)
+            {
+                core.WebMessageReceived -= OnWebMessageReceived;
+            }
+        }
+        catch
+        {
+            /* disposed */
+        }
+        finally
+        {
+            _webView = null;
+        }
+    }
+
+    public void DetachSecondary()
+    {
+        try
+        {
+            if (WebView2Safe.TryGetCore(_secondaryWebView) is { } core)
+            {
+                core.WebMessageReceived -= OnWebMessageReceived;
+            }
+        }
+        catch
+        {
+            /* disposed */
+        }
+        finally
+        {
+            _secondaryWebView = null;
+        }
     }
 
     public void NotifyWidgetStatus()
@@ -123,22 +155,23 @@ internal sealed class NativeBridge
 
         // Chrome nav must reach DesktopHost while embedded; while in window mode the App
         // already applied the click — only mirror to the host surface.
-        if (IsChromeNavUiAction(_pendingUiAction))
+        var pending = _surfaceState.Pending;
+        if (pending.Kind == PendingActionKind.Ui && IsChromeNavUiAction(pending.UiAction))
         {
             if (_embed.IsEmbedded)
             {
                 // SysListView32/WS_POPUP embed: the real click already reached whichever
-                // surface's own React onClick raised this (see _pendingUiActionSurface) —
+                // surface's own React onClick raised this (see pending.UiActionSurface) —
                 // it ran fn() locally there already. Echoing this push back to that same
                 // surface re-applies the nav a second time (prev/next silently skipping a
                 // month/week). Legacy Progman/WorkerW (WS_CHILD) embeds still need the full
                 // broadcast — DefView swallows the real click before DesktopHost's DOM
                 // ever sees it there, so the push is the only way the action reaches it.
-                if (_embed.IsPopupStyleEmbed && _pendingUiActionSurface == "desktop")
+                if (_embed.IsPopupStyleEmbed && pending.UiActionSurface == "desktop")
                 {
                     PostEventToAppOnly(payload);
                 }
-                else if (_embed.IsPopupStyleEmbed && _pendingUiActionSurface == "app")
+                else if (_embed.IsPopupStyleEmbed && pending.UiActionSurface == "app")
                 {
                     PostEventToDesktopHostOnly(payload);
                 }
@@ -163,37 +196,33 @@ internal sealed class NativeBridge
     private void PostEventToDesktopHostOnly(JsonObject payload)
     {
         payload["type"] ??= "event";
-        var json = payload.ToJsonString(JsonUtil.Compact);
-        try
-        {
-            _secondaryWebView?.CoreWebView2?.PostWebMessageAsJson(json);
-        }
-        catch
-        {
-            /* ignore */
-        }
+        WebView2Safe.TryPostJson(_secondaryWebView, payload.ToJsonString(JsonUtil.Compact));
     }
 
     private void PostEventToAppOnly(JsonObject payload)
     {
         payload["type"] ??= "event";
-        var json = payload.ToJsonString(JsonUtil.Compact);
-        try
-        {
-            _webView?.CoreWebView2?.PostWebMessageAsJson(json);
-        }
-        catch
-        {
-            /* ignore */
-        }
+        WebView2Safe.TryPostJson(_webView, payload.ToJsonString(JsonUtil.Compact));
     }
 
-    /// <summary>Period row chrome that stays on the desktop surface (no App unlock).</summary>
+    /// <summary>
+    /// Period row chrome that stays on the desktop surface (no App unlock). Deliberately
+    /// excludes hide/show-events and hide/show-completed — those toggle a persisted
+    /// setting, so Header.jsx's own onClick never calls SuspendForUi for them at all
+    /// (the settings-store "store-updated" broadcast already syncs both surfaces);
+    /// listing them here used to race that broadcast and double-apply the toggle.
+    /// </summary>
     private static bool IsChromeNavUiAction(string? action) =>
         action is "prev" or "next" or "today" or "prev-year" or "next-year"
-            or "hide-events" or "show-events"
-            or "hide-completed" or "show-completed"
             or "open-web" or "view-mode" or "view-month" or "view-week" or "view-year";
+
+    /// <summary>
+    /// Persisted viewOptions toggles — must never become pendingUiAction. Zone hits or
+    /// stale SuspendForUi calls for these used to race Header's own updateSettings PATCH
+    /// and flip the setting twice on one click.
+    /// </summary>
+    private static bool IsStoreSyncedUiAction(string? action) =>
+        action is "hide-events" or "show-events" or "hide-completed" or "show-completed";
 
 
     /// <summary>Temporary unlock for embedded day double-click → create editor.</summary>
@@ -204,18 +233,14 @@ internal sealed class NativeBridge
             return;
         }
 
-        _window.Dispatcher.Invoke(() =>
+        _ = _window.Dispatcher.InvokeAsync(async () =>
         {
             var normalized = dateKey.Trim();
 
             // Already temporarily unlocked (editor just closed, or still open) — refresh pending.
-            if (_embedSuspended)
+            if (_surfaceState.Suspended)
             {
-                _pendingCreateDate = normalized;
-                _pendingEditEventId = null;
-                _pendingEditDayKey = null;
-                _pendingUiAction = null;
-                _suspendToken = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                _surfaceState.UpdatePending(PendingAction.Create(normalized));
                 NotifyWidgetStatus();
                 return;
             }
@@ -227,14 +252,13 @@ internal sealed class NativeBridge
 
             // Claim before surface switch so a second caller (Host React + zone) cannot
             // run SuspendDesktopForUi twice (desktop-wide flash).
-            _embedSuspended = true;
-            _pendingCreateDate = normalized;
-            _pendingEditEventId = null;
-            _pendingEditDayKey = null;
-            _pendingUiAction = null;
-            _suspendToken = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            _surfaceState.Suspend(PendingAction.Create(normalized));
 
-            _surfaces?.SuspendDesktopForUi();
+            if (_surfaces is not null)
+            {
+                await _surfaces.SuspendDesktopForUiAsync();
+            }
+
             if (!_window.IsVisible)
             {
                 _window.Show();
@@ -254,18 +278,14 @@ internal sealed class NativeBridge
             return;
         }
 
-        _window.Dispatcher.Invoke(() =>
+        _ = _window.Dispatcher.InvokeAsync(async () =>
         {
             var normalizedEventId = eventId.Trim();
             var normalizedDayKey = dayKey.Trim();
 
-            if (_embedSuspended)
+            if (_surfaceState.Suspended)
             {
-                _pendingCreateDate = null;
-                _pendingEditEventId = normalizedEventId;
-                _pendingEditDayKey = normalizedDayKey;
-                _pendingUiAction = null;
-                _suspendToken = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                _surfaceState.UpdatePending(PendingAction.Edit(normalizedEventId, normalizedDayKey));
                 NotifyWidgetStatus();
                 return;
             }
@@ -275,14 +295,13 @@ internal sealed class NativeBridge
                 return;
             }
 
-            _embedSuspended = true;
-            _pendingCreateDate = null;
-            _pendingEditEventId = normalizedEventId;
-            _pendingEditDayKey = normalizedDayKey;
-            _pendingUiAction = null;
-            _suspendToken = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            _surfaceState.Suspend(PendingAction.Edit(normalizedEventId, normalizedDayKey));
 
-            _surfaces?.SuspendDesktopForUi();
+            if (_surfaces is not null)
+            {
+                await _surfaces.SuspendDesktopForUiAsync();
+            }
+
             if (!_window.IsVisible)
             {
                 _window.Show();
@@ -296,7 +315,7 @@ internal sealed class NativeBridge
 
     /// <summary>Temporary unlock for embedded header button clicks.</summary>
     /// <param name="originSurface">"desktop" or "app" — which WebView2 raised this
-    /// (see _pendingUiActionSurface); null for calls with no browser-side origin
+    /// (see PendingAction.UiActionSurface); null for calls with no browser-side origin
     /// (e.g. the legacy zone-monitor poll, which always targets DesktopHost).</param>
     public void SuspendForUi(string action, string? originSurface = null)
     {
@@ -306,23 +325,24 @@ internal sealed class NativeBridge
             return;
         }
 
-        _window.Dispatcher.Invoke(() =>
+        // Store-synced toggles are applied only by the surface that received the real
+        // click (Header onClick → updateSettings). Never queue them as pendingUiAction.
+        if (IsStoreSyncedUiAction(normalized))
         {
-            _pendingUiActionSurface = originSurface;
+            return;
+        }
 
+        _ = _window.Dispatcher.InvokeAsync(async () =>
+        {
             void SignalUi(string normalizedAction, bool stayEmbedded)
             {
-                _pendingCreateDate = null;
-                _pendingEditEventId = null;
-                _pendingEditDayKey = null;
-                _pendingUiAction = normalizedAction;
-                _suspendToken = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                _surfaceState.UpdatePending(PendingAction.Ui(normalizedAction, originSurface));
                 NotifyWidgetStatus();
                 // Chrome nav: clear after push so App poll does not double-apply when
                 // the click handler already ran onClick (window mode).
                 if (stayEmbedded && IsChromeNavUiAction(normalizedAction))
                 {
-                    _pendingUiAction = null;
+                    _surfaceState.ClearPending();
                 }
             }
 
@@ -346,7 +366,7 @@ internal sealed class NativeBridge
             // so closing it resumes desktop embed automatically.
             if (normalized is "search")
             {
-                UnlockToWindowModeForUi(normalized);
+                await UnlockToWindowModeForUiAsync(normalized, originSurface);
                 return;
             }
 
@@ -359,24 +379,22 @@ internal sealed class NativeBridge
             }
 
             // Same path as SuspendForCreate / day quick-edit.
-            // Claim _embedSuspended before surface switch — zone + Host onClick used to
+            // Claim suspend before surface switch — zone + Host onClick used to
             // double SuspendDesktopForUi and flash the whole desktop.
-            if (_embedSuspended)
+            if (_surfaceState.Suspended)
             {
-                _pendingUiAction = normalized;
-                _suspendToken = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                _surfaceState.UpdatePending(PendingAction.Ui(normalized, originSurface));
                 NotifyWidgetStatus();
                 return;
             }
 
-            _embedSuspended = true;
-            _pendingCreateDate = null;
-            _pendingEditEventId = null;
-            _pendingEditDayKey = null;
-            _pendingUiAction = normalized;
-            _suspendToken = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            _surfaceState.Suspend(PendingAction.Ui(normalized, originSurface));
 
-            _surfaces?.SuspendDesktopForUi();
+            if (_surfaces is not null)
+            {
+                await _surfaces.SuspendDesktopForUiAsync();
+            }
+
             if (!_window.IsVisible)
             {
                 _window.Show();
@@ -388,7 +406,7 @@ internal sealed class NativeBridge
         });
     }
 
-    public bool IsEmbedSuspended => _embedSuspended;
+    public bool IsEmbedSuspended => _surfaceState.Suspended;
 
     /// <summary>
     /// Claims the suspend flag before the very first desktop embed has happened yet (login
@@ -409,7 +427,7 @@ internal sealed class NativeBridge
                 return false;
             }
 
-            _embedSuspended = true;
+            _surfaceState.Suspend(PendingAction.None);
             NotifyWidgetStatus();
             return true;
         });
@@ -421,7 +439,7 @@ internal sealed class NativeBridge
     /// a temporary desktop-mode overlay (settings, quick-edit, auth, export) is suspended.
     /// The JS side normally clears suspend state via resumeDesktopEmbedAfterPaint()'s
     /// widget/resume call when the overlay unmounts; anything that hides/closes the window
-    /// through a different path must call this first, or _embedSuspended stays stuck true —
+    /// through a different path must call this first, or DesktopSurfaceState.Suspended stays stuck true —
     /// which makes every later SuspendForCreate/SuspendForEdit/SuspendForUi call take the
     /// "already suspended" shortcut against a window that is not actually shown, so the
     /// desktop calendar silently stops responding to double-click/settings until restart.
@@ -431,7 +449,7 @@ internal sealed class NativeBridge
     /// </summary>
     public bool CancelSuspendedOverlayIfActive()
     {
-        if (!_embedSuspended)
+        if (!_surfaceState.Suspended)
         {
             return false;
         }
@@ -447,31 +465,26 @@ internal sealed class NativeBridge
     }
 
     /// <summary>
-    /// Permanent window mode for UI that should leave desktop (e.g. search, settings).
-    /// Hides DesktopHost but keeps shell parent — no SetParent(null).
+    /// Permanent window mode for UI that should leave desktop (e.g. search).
+    /// Rematerializes App WebView and disposes DesktopHost (single-process window mode).
     /// </summary>
-    private void UnlockToWindowModeForUi(string pendingAction)
+    private async Task UnlockToWindowModeForUiAsync(string pendingAction, string? originSurface = null)
     {
         // Keep Activate from ApplyFrameTheme during Show (same guard as temp unlock).
         // Do not ClearSuspendState() first — that wiped pending and dropped the guard,
         // so Settings opened after the cover and flashed the desktop.
-        _embedSuspended = true;
-        _pendingCreateDate = null;
-        _pendingEditEventId = null;
-        _pendingEditDayKey = null;
-        _pendingUiAction = pendingAction;
-        _suspendToken = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        _surfaceState.Suspend(PendingAction.Ui(pendingAction, originSurface));
 
         // Start App overlay mount while Host is still visible.
         NotifyWidgetStatus();
 
-        // DWM-cloak swap on AppWindow (DesktopSurfaceController) — an atomic, already-
-        // painted uncloak, so there is no freeze-frame hold/timing race to size for
-        // Settings vs Search anymore.
-        _surfaces?.EnterWindowMode(bringToFront: true);
+        if (_surfaces is not null)
+        {
+            await _surfaces.EnterWindowModeAsync(bringToFront: true);
+        }
 
         // Permanent window — no resume. Clear suspend flag only; keep pending until ack.
-        _embedSuspended = false;
+        _surfaceState.MarkResumed();
 
         PersistLaunchMode("window");
         NotifyWidgetStatus();
@@ -484,6 +497,16 @@ internal sealed class NativeBridge
     /// </summary>
     private static bool UiActionRequiresUnlock(string action) =>
         action is "auth" or "export-excel" or "export-pdf" or "settings";
+
+    /// <summary>
+    /// Native dialog owner (file picker, MessageBox) — whichever WPF window is actually
+    /// the visible/interactive surface right now. Under SysListView32/WS_POPUP embed,
+    /// attachments are added in place on DesktopHost (Header.jsx opens the day/event
+    /// editor there directly, same as Settings) while App stays cloaked, so a dialog
+    /// owned by the cloaked App window would have no visible owner to anchor to.
+    /// </summary>
+    private Window ResolvePickerOwner() =>
+        _surfaces?.IsDesktopSurfaceActive == true && _surfaces.Host is Window host ? host : _window;
 
     private static string? NormalizeUiAction(string? action)
     {
@@ -508,35 +531,30 @@ internal sealed class NativeBridge
 
     private void ClearPendingUi()
     {
-        _pendingCreateDate = null;
-        _pendingEditEventId = null;
-        _pendingEditDayKey = null;
-        _pendingUiAction = null;
+        _surfaceState.ClearPending();
     }
 
     private void ClearSuspendState()
     {
-        _embedSuspended = false;
-        _suspendToken = 0;
-        ClearPendingUi();
+        _surfaceState.Reset();
     }
 
     private JsonObject BuildWidgetStatus()
     {
         var status = _embed.GetStatus();
-        status["embedSuspended"] = _embedSuspended;
-        status["resumeDesktopPending"] = _embedSuspended;
-        status["suspendToken"] = _suspendToken;
-        status["pendingCreateDate"] = _embedSuspended ? _pendingCreateDate : null;
-        status["pendingUiAction"] = !string.IsNullOrEmpty(_pendingUiAction) ? _pendingUiAction : null;
-        if (_embedSuspended
-            && !string.IsNullOrEmpty(_pendingEditEventId)
-            && !string.IsNullOrEmpty(_pendingEditDayKey))
+        var suspended = _surfaceState.Suspended;
+        var pending = _surfaceState.Pending;
+        status["embedSuspended"] = suspended;
+        status["resumeDesktopPending"] = suspended;
+        status["suspendToken"] = _surfaceState.SuspendToken;
+        status["pendingCreateDate"] = suspended && pending.Kind == PendingActionKind.Create ? pending.DateKey : null;
+        status["pendingUiAction"] = pending.Kind == PendingActionKind.Ui ? pending.UiAction : null;
+        if (suspended && pending.Kind == PendingActionKind.Edit)
         {
             status["pendingEditEvent"] = new JsonObject
             {
-                ["eventId"] = _pendingEditEventId,
-                ["dayKey"] = _pendingEditDayKey,
+                ["eventId"] = pending.EventId,
+                ["dayKey"] = pending.DayKey,
             };
         }
         else
@@ -645,6 +663,21 @@ internal sealed class NativeBridge
             try
             {
                 NotifyAuthChanged();
+            }
+            catch
+            {
+                /* ignore */
+            }
+
+            // This surface's own mount-time GET /api/store may have run before _currentToken
+            // was bound (e.g. a persistent login surviving a PC reboot — App's WebView2
+            // profile already has a token, this profile does not yet), returning the
+            // guest/empty-events branch of FilterStore with no later resync. Re-push a
+            // freshly filtered store now that the UI can listen, same reasoning as the
+            // auth re-push above.
+            try
+            {
+                BroadcastFilteredStore();
             }
             catch
             {
@@ -789,6 +822,16 @@ internal sealed class NativeBridge
         method = method.ToUpperInvariant();
         path = path.Split('?', 2)[0];
 
+        // Dual WebView2 profiles (App vs DesktopHost) do not share localStorage, so the
+        // Host surface often posts API calls with a null/stale token even while the shell
+        // session (_currentToken) is already bound by App. Without this fallback, Host-side
+        // eye-toggles (PATCH /api/calendars visible) and the follow-up GET /api/store hit
+        // RequireLogin/guest filtering and the optimistic hide is wiped or never persisted.
+        if (fromNativeShell && !_auth.IsValid(token) && _auth.IsValid(_currentToken))
+        {
+            token = _currentToken;
+        }
+
         if (path == "/api/health" && method == "GET")
         {
             return new JsonObject
@@ -837,6 +880,15 @@ internal sealed class NativeBridge
             // HTTP browser clients must never receive the shell token this way.
             if (fromNativeShell && _auth.IsValid(_currentToken))
             {
+                // This surface's own earlier GET /api/store (fired on mount, in parallel with
+                // this session check) ran before it had a token, so FilterStore returned it the
+                // guest/empty-events branch — most visible after a PC reboot with a persistent
+                // login, where the App profile's WebView2 storage already has a token but this
+                // Host profile's storage does not yet. BindShellSession's own broadcast above
+                // only fires when the bound token *changes*; since App already bound this same
+                // token earlier, that branch is a no-op here, so nothing else will ever re-push
+                // a correctly-filtered store to this surface. Resync explicitly.
+                BroadcastFilteredStore();
                 return BuildAuthPayload(includeToken: true);
             }
 
@@ -851,8 +903,10 @@ internal sealed class NativeBridge
         {
             var id = body["id"]?.GetValue<string>() ?? body["username"]?.GetValue<string>() ?? "";
             var pw = body["password"]?.GetValue<string>() ?? "";
+            // Browser login sends rememberMe; native shell sends persistent/remember.
             var persistent = body["persistent"]?.GetValue<bool>() == true
-                || body["remember"]?.GetValue<bool>() == true;
+                || body["remember"]?.GetValue<bool>() == true
+                || body["rememberMe"]?.GetValue<bool>() == true;
             var identity = _auth.TryAuthenticate(id, pw);
             if (identity is null)
             {
@@ -941,7 +995,7 @@ internal sealed class NativeBridge
             var existing = _store.FindEvent(id)
                 ?? throw new InvalidOperationException("일정을 찾을 수 없습니다.");
             RequireEventOwnership(session, existing);
-            return _attachments.AddFromPicker(_window, id);
+            return _attachments.AddFromPicker(ResolvePickerOwner(), id);
         }
 
         // POST /api/events/{id}/attachments/{attachmentId}/open
@@ -1202,9 +1256,10 @@ internal sealed class NativeBridge
 
             _window.Dispatcher.Invoke(() =>
             {
-                reopenCreate = _pendingCreateDate;
-                reopenEditId = _pendingEditEventId;
-                reopenEditDay = _pendingEditDayKey;
+                var pending = _surfaceState.Pending;
+                reopenCreate = pending.Kind == PendingActionKind.Create ? pending.DateKey : null;
+                reopenEditId = pending.Kind == PendingActionKind.Edit ? pending.EventId : null;
+                reopenEditDay = pending.Kind == PendingActionKind.Edit ? pending.DayKey : null;
                 ClearSuspendState();
             });
 
@@ -1401,7 +1456,7 @@ internal sealed class NativeBridge
                 // export). Minimizing there would hide AppWindow with no taskbar entry to
                 // restore it from (ShowInTaskbar=false) while DesktopHost is already hidden
                 // underneath — the calendar would vanish from the desktop until the user finds
-                // the tray menu, and _embedSuspended would stay stuck true. Cancel the overlay
+                // the tray menu, and the suspend flag would stay stuck true. Cancel the overlay
                 // and resume the desktop surface instead, same as the in-UI close button.
                 if (CancelSuspendedOverlayIfActive())
                 {
@@ -1561,6 +1616,22 @@ internal sealed class NativeBridge
         }
     }
 
+    /// <summary>Apply run-at-startup + window opacity from the current store settings.</summary>
+    public void ApplyShellSettingsFromStore()
+    {
+        try
+        {
+            if (_store.ReadStore()["settings"] is JsonObject settings)
+            {
+                ApplyShellSettings(settings);
+            }
+        }
+        catch
+        {
+            /* ignore */
+        }
+    }
+
     private void ApplyShellSettings(JsonObject settings)
     {
         try
@@ -1571,6 +1642,60 @@ internal sealed class NativeBridge
             {
                 StartupRegistrationService.Apply(runAtStartup);
             }
+
+            var opacity = AppConstants.DefaultOpacity;
+            if (settings["widget"] is JsonObject widget
+                && widget["opacity"] is JsonValue opacityNode
+                && opacityNode.TryGetValue<double>(out var opacityValue))
+            {
+                opacity = opacityValue;
+            }
+
+            _embed.SetOpacity(opacity);
+            ApplyMainWindowLayeredAlpha(opacity);
+        }
+        catch
+        {
+            /* ignore */
+        }
+    }
+
+    /// <summary>
+    /// Main (App) window whole-window alpha via Win32 layered attributes (LWA_ALPHA).
+    /// </summary>
+    private void ApplyMainWindowLayeredAlpha(double opacity)
+    {
+        try
+        {
+            var hwnd = new WindowInteropHelper(_window).Handle;
+            if (hwnd == IntPtr.Zero || !Win32.IsWindow(hwnd))
+            {
+                return;
+            }
+
+            var clamped = Math.Clamp(opacity, AppConstants.MinOpacity, 1.0);
+            clamped = Math.Round(clamped * 20.0) / 20.0;
+            clamped = Math.Clamp(clamped, AppConstants.MinOpacity, 1.0);
+            var alpha = (byte)Math.Clamp((int)Math.Round(clamped * 255.0), 13, 255);
+
+            var ex = Win32.GetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE).ToInt64();
+            if (alpha >= 255)
+            {
+                if ((ex & Win32.WS_EX_LAYERED) != 0)
+                {
+                    // Keep layered at full opacity so later slider moves don't fight WPF chrome.
+                    _ = Win32.SetLayeredWindowAttributes(hwnd, 0, 255, Win32.LWA_ALPHA);
+                }
+
+                return;
+            }
+
+            if ((ex & Win32.WS_EX_LAYERED) == 0)
+            {
+                Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE, new IntPtr(ex | Win32.WS_EX_LAYERED));
+            }
+
+            _ = Win32.SetLayeredWindowAttributes(hwnd, 0, alpha, Win32.LWA_ALPHA);
         }
         catch
         {
@@ -1875,7 +2000,7 @@ internal sealed class NativeBridge
 
     private void Reply(CoreWebView2? target, string? id, bool ok, JsonNode? result, string? error)
     {
-        var core = target ?? _webView?.CoreWebView2;
+        var core = target ?? WebView2Safe.TryGetCore(_webView) ?? WebView2Safe.TryGetCore(_secondaryWebView);
         if (core is null || string.IsNullOrEmpty(id))
         {
             return;
@@ -1889,7 +2014,14 @@ internal sealed class NativeBridge
             ["result"] = result?.DeepClone(),
             ["error"] = error,
         };
-        core.PostWebMessageAsJson(payload.ToJsonString(JsonUtil.Compact));
+        try
+        {
+            core.PostWebMessageAsJson(payload.ToJsonString(JsonUtil.Compact));
+        }
+        catch
+        {
+            /* disposed between resolve and post */
+        }
     }
 
     private void BindShellSession(string token, string? username, bool? remember, bool notify)
@@ -2006,28 +2138,14 @@ internal sealed class NativeBridge
     {
         payload["type"] ??= "event";
         var json = payload.ToJsonString(JsonUtil.Compact);
-        try
-        {
-            _webView?.CoreWebView2?.PostWebMessageAsJson(json);
-        }
-        catch
-        {
-            /* ignore */
-        }
+        WebView2Safe.TryPostJson(_webView, json);
 
         if (!broadcastToDesktopHost)
         {
             return;
         }
 
-        try
-        {
-            _secondaryWebView?.CoreWebView2?.PostWebMessageAsJson(json);
-        }
-        catch
-        {
-            /* ignore */
-        }
+        WebView2Safe.TryPostJson(_secondaryWebView, json);
     }
 
     /// <summary>Forward view-nav to the other surface only (avoid echo loops).</summary>
@@ -2072,7 +2190,7 @@ internal sealed class NativeBridge
             }
         }
 
-        TryPost(_webView?.CoreWebView2);
-        TryPost(_secondaryWebView?.CoreWebView2);
+        TryPost(WebView2Safe.TryGetCore(_webView));
+        TryPost(WebView2Safe.TryGetCore(_secondaryWebView));
     }
 }

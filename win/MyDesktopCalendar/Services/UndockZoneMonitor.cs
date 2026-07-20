@@ -39,22 +39,25 @@ internal sealed class UndockZoneMonitor
     // handler locally *and* calls suspendDesktopEmbedForUi itself — under native click
     // passthrough that already fires once from the real click, so leaving those zones
     // active here too double-applies the action (e.g. "next" advancing two months).
-    // "settings" is the one exception: under popup-style embed, Header.jsx's own
-    // onClick now opens it in place directly (see withUiSuspend's settings branch),
-    // so it is excluded from the popup-style-embed filter below — leaving it here
-    // too made this same real click *also* reach SuspendForUi, which unlocks a
-    // second, independent Settings overlay on the App window in parallel (visible
-    // as the window briefly "shrinking", and needing two X-clicks to fully close
-    // since DesktopHost's own panel state was never told to close).
+    // "settings", "search", "auth", "export-excel", and "export-pdf" are exceptions:
+    // under popup-style embed, Header.jsx's own onClick now opens/runs each of them in
+    // place directly (see withUiSuspend's IN_PLACE_UI_ACTIONS branch), so all five are
+    // excluded from the popup-style-embed filter below — leaving any of them here too
+    // made this same real click *also* reach SuspendForUi, which unlocks a second,
+    // independent overlay on the App window in parallel (visible as the window briefly
+    // "shrinking", and needing two X-clicks to fully close since DesktopHost's own
+    // panel state was never told to close).
     private static readonly HashSet<string> NativeOnlyUiActions = new(StringComparer.OrdinalIgnoreCase)
     {
         "settings", "search", "auth", "export-excel", "export-pdf",
     };
 
-    private static readonly HashSet<string> PopupStyleEmbedNativeOnlyUiActions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "search", "auth", "export-excel", "export-pdf",
-    };
+    // Every popup-style-embed overlay is now handled in place by Header.jsx's own
+    // onClick (see IN_PLACE_UI_ACTIONS there) — nothing left needs this native-only
+    // fallback under that path. Kept as an explicit (currently empty) allow-list rather
+    // than deleting the filter outright, so a future overlay that still needs it has an
+    // obvious place to be added back.
+    private static readonly HashSet<string> PopupStyleEmbedNativeOnlyUiActions = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly record struct ClientRect(int X, int Y, int Width, int Height);
     private readonly record struct UiActionZone(int X, int Y, int Width, int Height, string Action);

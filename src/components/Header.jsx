@@ -8,8 +8,8 @@ import { isDesktopSurfaceHost, isNeutralinoDesktopShell } from '../lib/isNeutral
 import { useAppDialog } from './AppDialogProvider.jsx';
 
 /**
- * Overlays that must open on App WebView after unlock — never on DesktopHost.
- * Settings/search use permanent UnlockToWindowModeForUi (like each other).
+ * Overlay actions with dedicated in-Header handling below (see withUiSuspend) instead
+ * of the generic chrome-nav passthrough.
  */
 const OVERLAY_UI_ACTIONS = new Set([
   'settings',
@@ -18,6 +18,19 @@ const OVERLAY_UI_ACTIONS = new Set([
   'export-excel',
   'export-pdf',
 ]);
+
+/**
+ * Under SysListView32/WS_POPUP embed the real click already reaches this surface's own
+ * DOM directly (see DesktopEmbedService.IsPopupStyleEmbed) — same precondition the
+ * day-cell double-click already relies on for the quick-edit popover — so these open in
+ * place instead of unlocking/undocking to the App window. Settings was the first one
+ * converted; search/auth/export used to defer entirely to the native zone-poll calling
+ * SuspendForUi (or, for export, stay disabled outright while embedded), which unlocked
+ * App in parallel with this real click. Export's download itself is a plain browser
+ * blob/anchor download (see downloadExport.js) — nothing about it needs the App window
+ * specifically, so it opens/runs in place exactly like the others.
+ */
+const IN_PLACE_UI_ACTIONS = new Set(['settings', 'search', 'auth', 'export-excel', 'export-pdf']);
 
 const VIEW_MODE_OPTIONS = [
   { value: 'year', label: '연' },
@@ -318,15 +331,34 @@ export default function Header({
     'today',
     'prev-year',
     'next-year',
-    'hide-events',
-    'show-events',
-    'hide-completed',
-    'show-completed',
     'open-web',
     'view-mode',
     'view-month',
     'view-week',
     'view-year',
+  ]);
+
+  /**
+   * Unlike CHROME_NAV_ACTIONS (pure ephemeral, per-surface React state with no other
+   * sync path — the explicit suspendDesktopEmbedForUi mirror is the *only* way the
+   * other WebView2 surface ever learns "today" advanced), hide/show-events and
+   * hide/show-completed toggle a persisted setting (viewOptions.eventsHidden /
+   * completedHidden). onToggleEventsHidden/onToggleCompletedHidden already call
+   * updateSettings(), which round-trips through CalendarStoreService.StoreChanged →
+   * NativeBridge.OnStoreChanged → a "store-updated" broadcast to *both* surfaces —
+   * so the other surface was always going to pick this up on its own. Also firing the
+   * chrome-nav mirror raced that broadcast: if the mirror's pendingUiAction reached
+   * the other surface before its own store-updated broadcast did, that surface's
+   * local eventsHidden/completedHidden hadn't flipped yet, so the guard in
+   * applyEventsHidden/applyCompletedHidden didn't catch it as a no-op — it ran a
+   * *second* updateSettings() PATCH, forcing a second full store round-trip/re-render
+   * a beat after the first (visible as a flicker on both surfaces).
+   */
+  const STORE_SYNCED_UI_ACTIONS = new Set([
+    'hide-events',
+    'show-events',
+    'hide-completed',
+    'show-completed',
   ]);
 
   const suspendForUi = useCallback((action) => {
@@ -350,15 +382,14 @@ export default function Header({
 
   /** @param {string} action @param {(() => void) | undefined} fn @param {{ resume?: boolean }} [options] */
   const withUiSuspend = useCallback((action, fn, options = {}) => () => {
-    // Wallpaper Host: Settings/Search/Login/export → App after unlock (like quick-edit).
+    // Wallpaper Host: Settings/Search/Login/export all open/run in place (see IN_PLACE_UI_ACTIONS).
     if (isDesktopSurfaceHost() && OVERLAY_UI_ACTIONS.has(action)) {
-      // Settings under SysListView32/WS_POPUP embed: the real click already reached this
-      // surface's own DOM directly, exactly like a day-cell double-click reaching its own
-      // onDoubleClick — open it in place (same overlay-over-still-embedded pattern as the
-      // quick-edit popover) instead of unlocking/undocking to the App window. That native
+      // See IN_PLACE_UI_ACTIONS: real click already reached this surface's own DOM —
+      // open in place (same overlay-over-still-embedded pattern as the quick-edit
+      // popover) instead of unlocking/undocking to the App window. That native
       // SetParent+Show swap was the source of the main window briefly shrinking and the
       // panel sometimes not opening at all.
-      if (action === 'settings' && popupStyleEmbed && actuallyEmbedded && !desktopEditMode) {
+      if (IN_PLACE_UI_ACTIONS.has(action) && popupStyleEmbed && actuallyEmbedded && !desktopEditMode) {
         fn?.();
         return;
       }
@@ -374,13 +405,17 @@ export default function Header({
     }
 
     const shouldResume = Boolean(options.resume && needsUiSuspend);
-    // Always notify native for period-row chrome so DesktopHost stays in sync in window mode
-    // (and so zone clicks while embedded reach the host WebView).
-    // Chrome nav sync / unlock only inside the native shell WebView — never from browser web UI.
-    if (isNeutralinoDesktopShell() && CHROME_NAV_ACTIONS.has(action) && window.myCalendar?.suspendDesktopEmbedForUi) {
-      void window.myCalendar.suspendDesktopEmbedForUi(action);
-    } else if (isNeutralinoDesktopShell()) {
-      suspendForUi(action);
+    // Store-synced toggles reach the other surface via the settings store broadcast
+    // already (see STORE_SYNCED_UI_ACTIONS) — no native mirror needed or wanted here.
+    if (!STORE_SYNCED_UI_ACTIONS.has(action)) {
+      // Always notify native for period-row chrome so DesktopHost stays in sync in window mode
+      // (and so zone clicks while embedded reach the host WebView).
+      // Chrome nav sync / unlock only inside the native shell WebView — never from browser web UI.
+      if (isNeutralinoDesktopShell() && CHROME_NAV_ACTIONS.has(action) && window.myCalendar?.suspendDesktopEmbedForUi) {
+        void window.myCalendar.suspendDesktopEmbedForUi(action);
+      } else if (isNeutralinoDesktopShell()) {
+        suspendForUi(action);
+      }
     }
     try {
       fn?.();
@@ -465,6 +500,10 @@ export default function Header({
       }
       const action = el.getAttribute('data-ui-action')?.trim().toLowerCase();
       if (!action) continue;
+      // Persisted hide toggles sync via store-updated only. Reporting them as hit-zones
+      // lets UndockZoneMonitor fire SuspendForUi on the same physical click as React
+      // onClick — which used to double-apply (or race) the setting on dual WebViews.
+      if (STORE_SYNCED_UI_ACTIONS.has(action)) continue;
       const rect = el.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) continue;
       clientRects.push({
@@ -765,6 +804,49 @@ export default function Header({
               <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z" /></svg>
             </button>
           )}
+          {desktopWidgetAvailable && (
+            <>
+              <button
+                type="button"
+                data-ui-action="desktop-mode"
+                className={cn(
+                  iconBtnClass,
+                  'disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-transparent disabled:hover:bg-transparent',
+                  isDesktopModeActive && softBlueIconBtnMutedClass,
+                  !desktopReady && !isDesktopModeActive && softBlueIconBtnMutedClass,
+                )}
+                aria-label="바탕화면"
+                aria-pressed={isDesktopModeActive}
+                aria-disabled={applyingDesktop || isDesktopModeActive || !desktopReady}
+                title={
+                  isDesktopModeActive
+                    ? '바탕화면 모드'
+                    : desktopReady
+                      ? '현재 창 위치·크기로 바탕화면에 고정'
+                      : '조건 미충족 — 클릭하여 확인'
+                }
+                disabled={applyingDesktop || isDesktopModeActive}
+                onClick={() => void handleApplyDesktop()}
+              >
+                <DesktopModeIcon />
+              </button>
+              <button
+                ref={windowModeBtnRef}
+                type="button"
+                className={cn(
+                  iconBtnClass,
+                  'disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-transparent disabled:hover:bg-transparent',
+                  isWindowModeActive && softBlueIconBtnMutedClass,
+                )}
+                aria-label="창모드"
+                aria-pressed={isWindowModeActive}
+                title="현재 위치·크기 그대로 일반 창으로 전환"
+                onClick={() => void handleEnterWindowMode()}
+              >
+                <WindowModeIcon />
+              </button>
+            </>
+          )}
           <button
             type="button"
             data-ui-action="auth"
@@ -781,8 +863,8 @@ export default function Header({
               actionBtnBase,
               'bg-gcal-blue-soft hover:bg-[#d2e3fc] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-gcal-blue-soft',
             )}
-            disabled={exporting || isDesktopModeActive}
-            title={isDesktopModeActive ? '창 모드에서 Excel로 내보낼 수 있습니다' : 'Excel로 내보내기'}
+            disabled={exporting}
+            title="Excel로 내보내기"
             onClick={withUiSuspend('export-excel', onExportExcel)}
           >
             EXCEL
@@ -794,8 +876,8 @@ export default function Header({
               actionBtnBase,
               'bg-gcal-blue-soft hover:bg-[#d2e3fc] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-gcal-blue-soft',
             )}
-            disabled={exporting || isDesktopModeActive}
-            title={isDesktopModeActive ? '창 모드에서 PDF로 내보낼 수 있습니다' : 'PDF로 내보내기'}
+            disabled={exporting}
+            title="PDF로 내보내기"
             onClick={withUiSuspend('export-pdf', onExportPdf)}
           >
             PDF
@@ -889,49 +971,6 @@ export default function Header({
           >
             오늘
           </button>
-          {desktopWidgetAvailable && (
-            <>
-              <button
-                type="button"
-                data-ui-action="desktop-mode"
-                className={cn(
-                  desktopModeIconBtnClass,
-                  softBlueIconBtnClass,
-                  isDesktopModeActive && softBlueIconBtnActiveClass,
-                  !desktopReady && !isDesktopModeActive && softBlueIconBtnMutedClass,
-                )}
-                aria-label="바탕화면"
-                aria-pressed={isDesktopModeActive}
-                aria-disabled={applyingDesktop || isDesktopModeActive || !desktopReady}
-                title={
-                  isDesktopModeActive
-                    ? '바탕화면 모드'
-                    : desktopReady
-                      ? '현재 창 위치·크기로 바탕화면에 고정'
-                      : '조건 미충족 — 클릭하여 확인'
-                }
-                disabled={applyingDesktop || isDesktopModeActive}
-                onClick={() => void handleApplyDesktop()}
-              >
-                <DesktopModeIcon />
-              </button>
-              <button
-                ref={windowModeBtnRef}
-                type="button"
-                className={cn(
-                  desktopModeIconBtnClass,
-                  softBlueIconBtnClass,
-                  isWindowModeActive && softBlueIconBtnMutedClass,
-                )}
-                aria-label="창모드"
-                aria-pressed={isWindowModeActive}
-                title="현재 위치·크기 그대로 일반 창으로 전환"
-                onClick={() => void handleEnterWindowMode()}
-              >
-                <WindowModeIcon />
-              </button>
-            </>
-          )}
           {isNeutralinoDesktopShell() && (
               <button
                 type="button"
@@ -951,7 +990,6 @@ export default function Header({
           )}
           <button
             type="button"
-            data-ui-action={eventsHidden ? 'show-events' : 'hide-events'}
             className={cn(
               desktopModeIconBtnClass,
               softBlueIconBtnClass,
@@ -967,16 +1005,18 @@ export default function Header({
                   : '일정과 날짜 배경색을 모두 숨기기'
             }
             disabled={!isLoggedIn}
-            onClick={withUiSuspend(
-              eventsHidden ? 'show-events' : 'hide-events',
-              () => onToggleEventsHidden?.(),
-            )}
+            onClick={(event) => {
+              // Store-synced toggles only — never chrome-nav / UI-zone suspend (that
+              // double-applied the setting and felt like needing two clicks).
+              event.preventDefault();
+              event.stopPropagation();
+              onToggleEventsHidden?.();
+            }}
           >
             <HideEventsEyeIcon open={!eventsHidden} />
           </button>
           <button
             type="button"
-            data-ui-action={completedHidden ? 'show-completed' : 'hide-completed'}
             className={cn(
               desktopModeIconBtnClass,
               softBlueIconBtnClass,
@@ -992,10 +1032,11 @@ export default function Header({
                   : '완료된 일정만 숨기기'
             }
             disabled={!isLoggedIn}
-            onClick={withUiSuspend(
-              completedHidden ? 'show-completed' : 'hide-completed',
-              () => onToggleCompletedHidden?.(),
-            )}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onToggleCompletedHidden?.();
+            }}
           >
             <HideCompletedCheckIcon checked={completedHidden} />
           </button>

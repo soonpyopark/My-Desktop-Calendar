@@ -6,11 +6,13 @@ namespace MyDesktopCalendar.Services;
 
 /// <summary>
 /// Dual-HWND surface switcher (rule #1): AppWindow stays top-level forever;
-/// DesktopHost is SetParent'd once. AppWindow visibility toggles use DWM cloak
-/// (DWMWA_CLOAK) instead of Show/Hide — it stays fully composed/rendering while
-/// cloaked, so switching surfaces is an atomic DWM step with nothing to freeze.
-/// DesktopHost (a WS_CHILD embedded surface) still uses Show/Hide, which is
-/// cheap since AppWindow, once uncloaked, already covers it before it disappears.
+/// DesktopHost is SetParent'd when desktop mode needs it. AppWindow visibility
+/// toggles use DWM cloak (DWMWA_CLOAK) instead of Show/Hide.
+///
+/// Single-WebView memory policy: the idle surface's WebView2 is disposed (not merely
+/// Low) so Task Manager shows one Chromium tree in steady state — App parked while
+/// desktop-cloaked; Host torn down in permanent window mode. Temporary UI suspend
+/// keeps Host Hidden+Low for a fast resume (brief dual trees only while overlays open).
 /// </summary>
 internal sealed class DesktopSurfaceController
 {
@@ -23,9 +25,8 @@ internal sealed class DesktopSurfaceController
 
     /// <summary>
     /// True once AppWindow has been DWM-cloaked. AppWindow stays real WS_VISIBLE
-    /// forever after its first Show — visibility toggles use DWMWA_CLOAK so
-    /// WebView2 never stops rendering between surface switches (rule: no freeze-frame
-    /// needed because the destination is always already fully painted).
+    /// forever after its first Show — visibility toggles use DWMWA_CLOAK. While
+    /// cloaked, App WebView is parked (disposed) so only DesktopHost Chromium remains.
     /// </summary>
     private bool _appCloaked;
 
@@ -98,6 +99,15 @@ internal sealed class DesktopSurfaceController
             // frozen frame. AppWindow, by contrast, is guaranteed on-screen at `target` right now
             // (target defaults to CaptureAppPhysicalBounds() above) and fully painted, so it's
             // always the correct freeze source for this transition.
+            // Right after a fresh reboot/login our own auto-start frequently wins the race
+            // against Explorer still building the desktop icon list — embedding before
+            // SysListView32 exists yet permanently commits this process to the heavier
+            // WS_CHILD/auto fallback (see IsSysListView32Ready's doc) for its entire
+            // lifetime, since a later Embed() call never re-attempts it once shell-parented.
+            // No-op almost instantly once the shell is already up (manual re-launch, not a
+            // fresh boot) — only actually waits right after a reboot.
+            await WaitForSysListView32ReadyAsync();
+
             var covered = cloakApp && !_appCloaked && DesktopTransitionCover.TryShow(
                 _app,
                 GetAppHwnd(),
@@ -116,12 +126,21 @@ internal sealed class DesktopSurfaceController
 
             if (cloakApp)
             {
-                CloakAppWindow();
+                CloakAppWindow(parkWebView: false);
+                // Defer dispose until after this turn — boot ProbeUiReadyAsync / NavigationCompleted
+                // may still be touching App WebView on the same dispatcher frame.
+                ScheduleParkAppWebView();
             }
             else
             {
-                // Host is now parented but must stay hidden underneath the still-visible App
-                // overlay until the caller resumes (ResumeDesktopAfterUi shows it + cloaks App).
+                // Login wall / boot-suspend claimed before this first embed: Host must stay
+                // hidden under the App overlay until resume. App was already DWM-cloaked at
+                // OnSourceInitialized (CloakAppWindowAtBoot) to hide the splash flash — so
+                // "keep App on top" here means we must *uncloak* it. Without that, both
+                // surfaces stay invisible (classic MSI first-run blank screen: claimBootSuspend
+                // for the login dialog + Host HideSurface + App still cloaked).
+                PlaceAppWindow(target);
+                await UncloakAppWindowAsync(bringToFront: true);
                 _embed.HideSurface();
             }
 
@@ -131,61 +150,107 @@ internal sealed class DesktopSurfaceController
         // Already shell-parented: same ShowHost→CloakApp path as temporary resume.
         if (cloakApp)
         {
-            ResumeDesktopAfterUi();
+            await ResumeDesktopAfterUiAsync();
         }
     }
 
-    /// <summary>Permanent window mode — hide desktop host, keep shell parent.</summary>
-    public void EnterWindowMode(bool bringToFront = true)
+    private void ScheduleParkAppWebView()
+    {
+        if (_app is not MainWindow main)
+        {
+            return;
+        }
+
+        _ = main.Dispatcher.BeginInvoke(
+            () =>
+            {
+                if (_appCloaked)
+                {
+                    main.ParkAppWebViewForDesktop();
+                }
+            },
+            System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+    }
+
+    /// <summary>Permanent window mode — show App, dispose DesktopHost WebView2 entirely.</summary>
+    public Task EnterWindowModeAsync(bool bringToFront = true) => EnterWindowModeCoreAsync(bringToFront);
+
+    /// <summary>Sync entry for legacy call sites; prefer <see cref="EnterWindowModeAsync"/>.</summary>
+    public void EnterWindowMode(bool bringToFront = true) =>
+        _ = EnterWindowModeCoreAsync(bringToFront);
+
+    private async Task EnterWindowModeCoreAsync(bool bringToFront)
     {
         var target = Normalize(_embed.LockedBounds ?? CaptureAppPhysicalBounds() ?? _embed.GetCurrentBounds());
         _embed.LockScreenBounds(target);
 
-        // Uncloak App directly over Host's current bounds before Host disappears.
-        // App was kept fully composed while cloaked (WebView2 never stopped rendering),
-        // so this is a single atomic DWM step — nothing to freeze, no timing race.
         PlaceAppWindow(target);
-        UncloakAppWindow(bringToFront);
+        await UncloakAppWindowAsync(bringToFront);
 
         if (_embed.IsShellParented)
         {
             _embed.HideSurface();
         }
+
+        // Drop the Host Chromium tree so window mode keeps a single WebView2 process group.
+        DestroyHost();
     }
 
     /// <summary>Temporary App overlay for editors/settings while desktop mode remains preferred.</summary>
-    public void SuspendDesktopForUi()
+    public Task SuspendDesktopForUiAsync() => SuspendDesktopForUiCoreAsync();
+
+    public void SuspendDesktopForUi() => _ = SuspendDesktopForUiCoreAsync();
+
+    private async Task SuspendDesktopForUiCoreAsync()
     {
         var target = Normalize(_embed.LockedBounds ?? CaptureAppPhysicalBounds() ?? _embed.GetCurrentBounds());
         _embed.LockScreenBounds(target);
 
-        // Uncloak App (already rendered) over Host, then hide Host underneath — no
-        // wallpaper peek because App already covers the bounds before Host disappears.
         PlaceAppWindow(target);
-        UncloakAppWindow(bringToFront: true);
+        await UncloakAppWindowAsync(bringToFront: true);
 
         if (_embed.IsShellParented)
         {
             _embed.HideSurface();
         }
+        // Host stays parented + Low (HideSurface) for a fast resume — briefly two trees
+        // only while the overlay is open.
     }
 
     /// <summary>Return to desktop host after temporary overlay/window mode.</summary>
-    public void ResumeDesktopAfterUi()
+    public Task ResumeDesktopAfterUiAsync() => ResumeDesktopAfterUiCoreAsync();
+
+    public void ResumeDesktopAfterUi() => _ = ResumeDesktopAfterUiCoreAsync();
+
+    private async Task ResumeDesktopAfterUiCoreAsync()
     {
-        if (!_embed.IsShellParented)
+        if (!_embed.IsShellParented || _host is null || !_hostReady)
         {
-            // Should not happen; fall back to ensuring desktop.
-            _ = EnterDesktopModeAsync();
+            await EnterDesktopModeAsync();
             return;
         }
 
         var target = Normalize(_embed.LockedBounds ?? _embed.GetCurrentBounds());
 
-        // Show Host underneath first — App (uncloaked, on top) still covers it, so this
-        // is invisible. Then cloak App to reveal the already-current Host in one step.
         _embed.ShowSurface(target);
-        CloakAppWindow();
+        CloakAppWindow(parkWebView: false);
+        ScheduleParkAppWebView();
+    }
+
+    /// <summary>See the call site's comment in <see cref="EnterDesktopModeAsync"/>.</summary>
+    private static async Task WaitForSysListView32ReadyAsync()
+    {
+        const int maxAttempts = 16;
+        const int intervalMs = 150;
+        for (var i = 0; i < maxAttempts; i++)
+        {
+            if (DesktopEmbedService.IsSysListView32Ready())
+            {
+                return;
+            }
+
+            await Task.Delay(intervalMs);
+        }
     }
 
     public async Task EnsureHostReadyAsync()
@@ -223,8 +288,15 @@ internal sealed class DesktopSurfaceController
         // Create HWND without activating / flashing in the taskbar.
         _host.ShowActivated = false;
         _host.ShowInTaskbar = false;
-        _host.Width = 16;
-        _host.Height = 16;
+        // Size to the bounds this session already expects to embed at (persisted from a prior
+        // run via RestoreWindowSession → _embed.LockScreenBounds, which always runs before
+        // OnLoaded ever reaches this call) instead of a fixed tiny placeholder. WebView2 then
+        // lays out/renders the real calendar at its true final size while still off-screen, so
+        // the first embed is a pure reposition — no in-place resize (and the WebView2 resize-
+        // latency flash that comes with one) right as the surface becomes visible.
+        var initialSize = _embed.LockedBounds ?? DesktopEmbedService.GetDefaultBounds();
+        _host.Width = initialSize.Width;
+        _host.Height = initialSize.Height;
         _host.Left = -32000;
         _host.Top = -32000;
         _host.Show();
@@ -241,6 +313,56 @@ internal sealed class DesktopSurfaceController
         _hostReady = true;
     }
 
+    /// <summary>
+    /// Tear down DesktopHost WebView2 + HWND. Next <see cref="EnsureHostReadyAsync"/> recreates it.
+    /// </summary>
+    private void DestroyHost()
+    {
+        if (_host is null && !_hostReady)
+        {
+            return;
+        }
+
+        try
+        {
+            _bridge().DetachSecondary();
+        }
+        catch
+        {
+            /* ignore */
+        }
+
+        _embed.ReleaseShellHost();
+
+        var host = _host;
+        _host = null;
+        _hostReady = false;
+        _ensureHostTask = null;
+
+        if (host is null)
+        {
+            return;
+        }
+
+        try
+        {
+            host.TearDownWebView();
+        }
+        catch
+        {
+            /* ignore */
+        }
+
+        try
+        {
+            host.Close();
+        }
+        catch
+        {
+            /* ignore */
+        }
+    }
+
     /// <summary>Real Show() only — never Hide() again once called (rule: cloak controls visibility).</summary>
     private void EnsureAppShown()
     {
@@ -251,23 +373,44 @@ internal sealed class DesktopSurfaceController
     }
 
     /// <summary>
-    /// Hide AppWindow via DWM cloak instead of Hide(). The window (and its WebView2)
-    /// keeps being composed while cloaked, so the next Uncloak is instant with nothing
-    /// stale to repaint — this is what replaces the old freeze-frame cover entirely.
+    /// Hide AppWindow via DWM cloak, then optionally dispose App WebView (single-process policy).
     /// </summary>
-    private void CloakAppWindow()
+    private void CloakAppWindow(bool parkWebView)
     {
         EnsureAppShown();
         SetAppCloak(true);
+        if (parkWebView && _app is MainWindow main)
+        {
+            main.ParkAppWebViewForDesktop();
+        }
+        else
+        {
+            SetAppWebViewActive(false);
+        }
     }
 
-    /// <summary>Reveal AppWindow via DWM uncloak — already fully rendered, so this is instant.</summary>
-    private void UncloakAppWindow(bool bringToFront)
+    /// <summary>
+    /// Rematerialize App WebView if parked, wake it under the cloak, then DWM-uncloak.
+    /// </summary>
+    private async Task UncloakAppWindowAsync(bool bringToFront)
     {
         EnsureAppShown();
+        // Resolve WindowState *before* the reveal, not after — WPF's own state-change
+        // layout/restore work should happen while still invisible (cloaked), not race the
+        // DWM composite the user is actually looking at.
+        _app.WindowState = WindowState.Normal;
+
+        if (_app is MainWindow main)
+        {
+            await main.EnsureAppWebViewReadyAsync();
+        }
+        else
+        {
+            SetAppWebViewActive(true);
+        }
+
         SetAppCloak(false);
 
-        _app.WindowState = WindowState.Normal;
         if (bringToFront)
         {
             _app.Activate();
@@ -276,6 +419,14 @@ internal sealed class DesktopSurfaceController
             {
                 Win32.SetForegroundWindow(hwnd);
             }
+        }
+    }
+
+    private void SetAppWebViewActive(bool active)
+    {
+        if (_app is MainWindow main)
+        {
+            main.SetAppWebViewActive(active);
         }
     }
 

@@ -75,10 +75,13 @@ export function useEventHoverPreview({ resetTimerOnMove = true, onOpen = null } 
   }, [schedulePreview]);
 
   const handleEventMouseMove = useCallback((clientX, clientY) => {
-    if (!resetTimerOnMoveRef.current) return;
-
     const last = pointerRef.current;
     if (!last || !targetRef.current) return;
+
+    // Always track the latest pointer so onOpen (list hover) matches click placement.
+    pointerRef.current = { x: clientX, y: clientY };
+
+    if (!resetTimerOnMoveRef.current) return;
 
     const moved =
       Math.abs(clientX - last.x) > MOVE_THRESHOLD_PX
@@ -86,7 +89,6 @@ export function useEventHoverPreview({ resetTimerOnMove = true, onOpen = null } 
 
     if (!moved) return;
 
-    pointerRef.current = { x: clientX, y: clientY };
     setPreview(null);
     schedulePreview();
   }, [schedulePreview]);

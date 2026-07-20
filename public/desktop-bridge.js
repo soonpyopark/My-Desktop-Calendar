@@ -229,16 +229,14 @@
     const action = status?.pendingUiAction;
     // DesktopHost: chrome nav only. Settings/search unlock to App window mode.
     if (isDesktopSurfaceHost()) {
+      // hide/show-events and hide/show-completed sync via store-updated only —
+      // never as pendingUiAction mirrors (that raced the PATCH and double-toggled).
       const allowed = new Set([
         'prev',
         'next',
         'today',
         'prev-year',
         'next-year',
-        'hide-events',
-        'show-events',
-        'hide-completed',
-        'show-completed',
         'reload',
         'view-mode',
         'view-month',

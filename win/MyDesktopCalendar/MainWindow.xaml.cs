@@ -2,6 +2,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json.Nodes;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Forms;
 using System.Windows.Interop;
 using Microsoft.Web.WebView2.Core;
@@ -108,9 +109,10 @@ public partial class MainWindow : Window
         Closing += OnClosing;
         StateChanged += OnStateChanged;
         // Track footprint + (on size-drag only) pin WebView size under a solid cover.
-        // Never Visibility.Collapsed / MemoryUsageTargetLevel.Low — those rematerialize blank
-        // on some WebView2/GPU combos (esp. offline Evergreen). Pinning defers Chromium layout
-        // to mouse-up so resize stays as fast as the old Collapsed path without the blank risk.
+        // Never Visibility.Collapsed during resize — that rematerialized blank on some
+        // WebView2/GPU combos. Idle-surface Low memory (Visible) is applied separately via
+        // WebViewSurfaceMemory when the App HWND is DWM-cloaked. Pinning defers Chromium
+        // layout to mouse-up so resize stays lightweight without the blank risk.
         LocationChanged += OnWindowLocationChanged;
         SizeChanged += OnWindowSizeChanged;
 
@@ -309,7 +311,7 @@ public partial class MainWindow : Window
         try
         {
             PinWebViewSizeForResizeDrag();
-            // Cover only — never Visibility.Collapsed / MemoryUsageTargetLevel.Low.
+            // Cover only — never Visibility.Collapsed during the drag.
             ResizeGhost.Visibility = Visibility.Visible;
             if (WebView.Visibility != Visibility.Visible)
             {
@@ -409,25 +411,149 @@ public partial class MainWindow : Window
     /// </summary>
     private void EnsureWebViewRematerialized()
     {
+        if (_appWebViewParked)
+        {
+            _ = EnsureAppWebViewReadyAsync();
+            return;
+        }
+
+        SetAppWebViewActive(true);
+    }
+
+    /// <summary>
+    /// Idle-surface policy for the App WebView (see <see cref="WebViewSurfaceMemory"/>).
+    /// Called from <see cref="DesktopSurfaceController"/> when cloaking / revealing App.
+    /// </summary>
+    internal void SetAppWebViewActive(bool active)
+    {
+        if (_appWebViewParked)
+        {
+            return;
+        }
+
+        WebViewSurfaceMemory.SetActive(WebView, active);
+    }
+
+    private bool _appWebViewParked;
+    private int _appWebViewGeneration;
+    private Task? _ensureAppWebViewTask;
+
+    /// <summary>
+    /// Dispose the App WebView2 while desktop mode is active so only DesktopHost's
+    /// Chromium tree remains. Recreated by <see cref="EnsureAppWebViewReadyAsync"/>.
+    /// </summary>
+    internal void ParkAppWebViewForDesktop()
+    {
+        if (_appWebViewParked)
+        {
+            return;
+        }
+
+        // Mark parked before Dispose so in-flight probes / Activated handlers skip the
+        // dying control (accessing CoreWebView2 after Dispose throws unhandled).
+        _appWebViewParked = true;
+        _appWebViewGeneration++;
+
         try
         {
-            if (WebView.Visibility != Visibility.Visible)
-            {
-                WebView.Visibility = Visibility.Visible;
-            }
-
-            if (WebView.CoreWebView2 is { } core)
-            {
-                core.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Normal;
-            }
-
-            WebView.InvalidateVisual();
-            WebView.UpdateLayout();
+            _bridge.DetachPrimary();
         }
         catch
         {
-            /* older runtime / early init */
+            /* ignore */
         }
+
+        try
+        {
+            if (WebView2Safe.TryGetCore(WebView) is { } core)
+            {
+                core.NavigationCompleted -= OnWebViewNavigationCompleted;
+            }
+        }
+        catch
+        {
+            /* ignore */
+        }
+
+        var grid = Content as Grid;
+        if (grid is null)
+        {
+            WebViewSurfaceMemory.SetActive(WebView, false);
+            return;
+        }
+
+        try
+        {
+            grid.Children.Remove(WebView);
+            WebView.Dispose();
+        }
+        catch
+        {
+            /* ignore */
+        }
+
+        WebView = new Microsoft.Web.WebView2.Wpf.WebView2
+        {
+            DefaultBackgroundColor = System.Drawing.Color.FromArgb(0xFF, 0x20, 0x21, 0x24),
+            Visibility = Visibility.Collapsed,
+        };
+        System.Windows.Controls.Panel.SetZIndex(WebView, 0);
+        grid.Children.Insert(0, WebView);
+    }
+
+    /// <summary>
+    /// Ensure App WebView2 exists and has painted the React UI (under cloak / before show).
+    /// </summary>
+    internal async Task EnsureAppWebViewReadyAsync()
+    {
+        if (!_appWebViewParked && WebView2Safe.TryGetCore(WebView) is not null)
+        {
+            WebView.Visibility = Visibility.Visible;
+            WebViewSurfaceMemory.SetActive(WebView, true);
+            return;
+        }
+
+        if (_ensureAppWebViewTask is not null)
+        {
+            await _ensureAppWebViewTask;
+            return;
+        }
+
+        _ensureAppWebViewTask = RematerializeAppWebViewAsync();
+        try
+        {
+            await _ensureAppWebViewTask;
+        }
+        finally
+        {
+            _ensureAppWebViewTask = null;
+        }
+    }
+
+    private async Task RematerializeAppWebViewAsync()
+    {
+        var generation = _appWebViewGeneration;
+        BootSplash.Visibility = Visibility.Visible;
+        WebView.Visibility = Visibility.Visible;
+        await InitWebViewAsync();
+        if (generation != _appWebViewGeneration)
+        {
+            return;
+        }
+
+        if (WebView2Safe.TryGetCore(WebView) is { } core)
+        {
+            await WebViewReadyProbe.WaitUntilReadyAsync(core, maxAttempts: 50, intervalMs: 100);
+        }
+
+        if (generation != _appWebViewGeneration)
+        {
+            return;
+        }
+
+        _appWebViewParked = false;
+        WebViewSurfaceMemory.SetActive(WebView, true);
+        HideBootSplash();
     }
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
@@ -510,6 +636,8 @@ public partial class MainWindow : Window
         _hwndSource = HwndSource.FromHwnd(_hwnd);
         _hwndSource?.AddHook(WndProc);
         _bridge.ApplyFrameThemeFromSettings();
+        // HWND exists now — apply persisted main-window layered alpha (and Host _alpha).
+        _bridge.ApplyShellSettingsFromStore();
 
         RestoreWindowSession();
     }
@@ -823,14 +951,25 @@ public partial class MainWindow : Window
 
     private async Task ProbeUiReadyAsync()
     {
+        var generation = _appWebViewGeneration;
         try
         {
             for (var attempt = 0; attempt < 40; attempt++)
             {
                 await Task.Delay(250);
-                if (WebView.CoreWebView2 is null) return;
+                // App may have been parked (disposed) for desktop single-WebView policy.
+                if (_appWebViewParked || generation != _appWebViewGeneration)
+                {
+                    return;
+                }
 
-                var raw = await WebView.CoreWebView2.ExecuteScriptAsync(
+                var core = WebView2Safe.TryGetCore(WebView);
+                if (core is null)
+                {
+                    return;
+                }
+
+                var raw = await core.ExecuteScriptAsync(
                     """
                     (function () {
                       var root = document.getElementById('root');

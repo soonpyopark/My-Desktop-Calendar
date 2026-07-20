@@ -100,9 +100,26 @@ export default function EventEditor({
   const [attachments, setAttachments] = useState([]);
   const [attachBusy, setAttachBusy] = useState(false);
   const titleInputRef = useRef(null);
+  /** Re-seed the form only when the editor opens for a different event (or create). */
+  const formSeedKeyRef = useRef(null);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      formSeedKeyRef.current = null;
+      return;
+    }
+
+    // Dual-WebView store broadcasts (common in desktop mode) replace `event` /
+    // `calendars` with new object identities while the user is mid-edit. The old
+    // dependency list re-ran this effect on every broadcast and wiped in-progress
+    // fields (e.g. startDate snapping back to event.startDate).
+    const seedKey = event?.id
+      ? `edit:${event.id}`
+      : `new:${defaultDate ? toDateKey(defaultDate) : 'today'}`;
+    if (formSeedKeyRef.current === seedKey) {
+      return;
+    }
+    formSeedKeyRef.current = seedKey;
 
     if (event) {
       setTitle(event.title ?? '');
@@ -309,7 +326,7 @@ export default function EventEditor({
 
   return (
     <div
-      className="fixed inset-0 z-20 flex items-center justify-center overflow-y-auto bg-[rgba(32,33,36,0.28)] p-4"
+      className="fixed inset-0 z-20 flex items-center justify-center overflow-y-auto p-4"
       role="presentation"
       onClick={onClose}
     >
@@ -407,13 +424,32 @@ export default function EventEditor({
           <div className="flex flex-nowrap items-center justify-start gap-2.5">
             {allDay ? (
               <>
-                <input type="date" className={fieldClass} value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+                <input
+                  type="date"
+                  className={fieldClass}
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  aria-label="시작일"
+                />
                 <span>~</span>
-                <input type="date" className={fieldClass} value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+                <input
+                  type="date"
+                  className={fieldClass}
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  min={startDate}
+                  aria-label="종료일"
+                />
               </>
             ) : (
               <>
-                <input type="date" className={fieldClass} value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+                <input
+                  type="date"
+                  className={fieldClass}
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  aria-label="시작일"
+                />
                 <input
                   type="time"
                   className={timeFieldClass}
@@ -429,7 +465,14 @@ export default function EventEditor({
                   onChange={(e) => setEndTime(e.target.value)}
                   aria-label="종료 시간"
                 />
-                <input type="date" className={fieldClass} value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+                <input
+                  type="date"
+                  className={fieldClass}
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  min={startDate}
+                  aria-label="종료일"
+                />
               </>
             )}
           </div>

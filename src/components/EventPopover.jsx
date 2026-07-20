@@ -35,9 +35,13 @@ export default function EventPopover({
   useEffect(() => {
     if (!event) return undefined;
     const handlePointerDown = (e) => {
-      if (ref.current && !ref.current.contains(e.target)) {
-        onClose();
-      }
+      const target = e.target;
+      if (!(target instanceof Node)) return;
+      if (ref.current?.contains(target)) return;
+      // Keep detail open while interacting with the day "더보기" list — row hover/click
+      // swaps the shown event instead of dismissing the panel.
+      if (target instanceof Element && target.closest('.day-events-popover')) return;
+      onClose();
     };
     document.addEventListener('mousedown', handlePointerDown, true);
     return () => document.removeEventListener('mousedown', handlePointerDown, true);
@@ -63,18 +67,20 @@ export default function EventPopover({
       }))
     : getCenteredPanelStyle({ padding: 16, maxWidth: 418 });
 
+  // Above DayEventsPopover (z-46) so detail paints over the day list when both are open.
+  // No dim backdrop — panel only (same feel as DayQuickEditPopover / Settings).
   return (
     <div
       className={
         anchorRect
-          ? 'pointer-events-none fixed inset-0 z-[30] bg-[rgba(32,33,36,0.28)]'
-          : 'pointer-events-none fixed inset-0 z-[30] flex items-center justify-center overflow-y-auto bg-[rgba(32,33,36,0.28)] p-4'
+          ? 'pointer-events-none fixed inset-0 z-[50]'
+          : 'pointer-events-none fixed inset-0 z-[50] flex items-center justify-center overflow-y-auto p-4'
       }
       role="presentation"
     >
       <div
         ref={ref}
-        className={`${resolvedAnchor ? 'fixed' : 'relative'} pointer-events-auto z-[40] flex w-[418px] max-w-full flex-col overflow-hidden rounded-xl bg-gcal-surface shadow-g-lg`}
+        className={`${resolvedAnchor ? 'fixed' : 'relative'} pointer-events-auto z-[51] flex w-[418px] max-w-full flex-col overflow-hidden rounded-xl bg-gcal-surface shadow-g-lg`}
         style={panelStyle}
         onClick={(e) => e.stopPropagation()}
         role="dialog"

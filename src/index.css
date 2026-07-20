@@ -120,6 +120,22 @@
     @apply flex h-full flex-col overflow-hidden;
   }
 
+  /*
+   * Hide toggles — keep event DOM mounted and hide with CSS so the month grid
+   * does not remount bars (that remount flashed as 깜빡임 on toggle).
+   */
+  .month-view.is-events-hidden .day-events {
+    display: none;
+  }
+
+  .month-view.is-events-hidden .day-cell.has-day-color::before {
+    opacity: 0;
+  }
+
+  .month-view.is-completed-hidden .event-bar.is-completed {
+    display: none;
+  }
+
   .month-body {
     @apply flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-y-contain;
     touch-action: pan-y;
@@ -391,9 +407,16 @@
     line-height: 1;
   }
 
+  /* Pin link/attach icons to the trailing edge of day-cell bars and day lists. */
+  .event-bar-trailing {
+    @apply ml-auto inline-flex shrink-0 items-center;
+    gap: 2px;
+    padding-right: 3px;
+  }
+
   .event-link-icon,
   .event-attach-icon {
-    @apply mr-1 inline-flex shrink-0 items-center justify-center opacity-70;
+    @apply inline-flex shrink-0 items-center justify-center opacity-85;
     width: 12px;
     height: 12px;
   }
@@ -401,10 +424,6 @@
   .event-link-icon,
   .event-attach-icon {
     @apply cursor-pointer hover:opacity-100;
-  }
-
-  .event-link-icon + .event-attach-icon {
-    margin-left: 1px;
   }
 
   .event-dot-glyph {

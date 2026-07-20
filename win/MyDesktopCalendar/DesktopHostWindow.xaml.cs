@@ -113,27 +113,30 @@ public partial class DesktopHostWindow : Window
         WebViewReadyProbe.WaitUntilReadyAsync(WebView.CoreWebView2, maxAttempts, intervalMs);
 
     /// <summary>
-    /// Keep Host Chromium warm while the HWND is parked (SW_HIDE).
-    /// Collapsed / Low memory forced rematerialize blanks on every mode switch.
+    /// Wake (Normal) or rest (Low) Host Chromium. HWND may already be SW_HIDE'd —
+    /// visibility of the WPF control stays Visible; see <see cref="WebViewSurfaceMemory"/>.
     /// </summary>
-    public void SetSurfaceActive(bool active)
+    public void SetSurfaceActive(bool active) => WebViewSurfaceMemory.SetActive(WebView, active);
+
+    /// <summary>Dispose the Host WebView2 so its Chromium process tree can exit.</summary>
+    public void TearDownWebView()
     {
-        _ = active;
         try
         {
-            if (WebView.Visibility != Visibility.Visible)
-            {
-                WebView.Visibility = Visibility.Visible;
-            }
-
-            if (WebView.CoreWebView2 is { } core)
-            {
-                core.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Normal;
-            }
+            WebView.Visibility = Visibility.Collapsed;
         }
         catch
         {
-            /* older runtime / early init */
+            /* ignore */
+        }
+
+        try
+        {
+            WebView.Dispose();
+        }
+        catch
+        {
+            /* already disposed / early init */
         }
     }
 }

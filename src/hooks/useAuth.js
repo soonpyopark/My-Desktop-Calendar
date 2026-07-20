@@ -103,7 +103,11 @@ function applyAuthPayload(body, setUser, setRole, setIsSuperAdmin) {
     const username = body.loginId || body.username || 'admin';
     const role = body.role === 'super_admin' || body.isSuperAdmin || body.admin ? 'super_admin' : (body.role || 'member');
     const isSuper = role === 'super_admin' || body.isSuperAdmin === true || body.admin === true;
-    writeAuthSession(Boolean(body.remember), username, body.token, {
+    // Keep the user's "로그인 유지" storage choice. Session sync used to pass
+    // server remember:false (browser field was rememberMe) and rewrite the token
+    // into sessionStorage — so a newly opened web-icon tab looked logged out.
+    const rememberMe = getRememberMePreference();
+    writeAuthSession(rememberMe, username, body.token, {
       role,
       isSuperAdmin: isSuper,
       updatePreference: false,
@@ -258,7 +262,13 @@ export function useAuth() {
       const response = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, password, rememberMe: Boolean(rememberMe) }),
+        body: JSON.stringify({
+          id,
+          password,
+          rememberMe: Boolean(rememberMe),
+          remember: Boolean(rememberMe),
+          persistent: Boolean(rememberMe),
+        }),
       });
       const contentType = response.headers.get('Content-Type') ?? '';
       const body = contentType.includes('application/json')

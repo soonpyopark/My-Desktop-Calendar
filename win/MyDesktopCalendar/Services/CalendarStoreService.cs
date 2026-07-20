@@ -2003,7 +2003,9 @@ internal sealed class CalendarStoreService
         merged["launchMode"] = NormalizeWidgetLaunchMode(inputWidget);
         var launchMode = GetString(merged, "launchMode", "window");
         merged["enabled"] = launchMode == "desktop";
-        merged["opacity"] = Math.Clamp(GetDouble(merged, "opacity", AppConstants.DefaultOpacity), AppConstants.MinOpacity, 1.0);
+        var opacity = Math.Clamp(GetDouble(merged, "opacity", AppConstants.DefaultOpacity), AppConstants.MinOpacity, 1.0);
+        opacity = Math.Round(opacity * 20.0) / 20.0;
+        merged["opacity"] = Math.Clamp(opacity, AppConstants.MinOpacity, 1.0);
         merged["chromeTopInset"] = ClampInt(GetDouble(inputWidget, "chromeTopInset", 0), 0, 200);
         merged["chromeLeftInset"] = ClampInt(GetDouble(inputWidget, "chromeLeftInset", 0), 0, 80);
         merged["chromeRightInset"] = ClampInt(GetDouble(inputWidget, "chromeRightInset", 0), 0, 80);

@@ -199,6 +199,8 @@ export function useCalendarData() {
   const suppressHistoryRef = useRef(false);
   const storeRef = useRef(store);
   const skipRemoteRefreshUntilRef = useRef(0);
+  /** Pin hide toggles across racing store-updated / refresh (prevents hide↔show flicker). */
+  const pinnedViewOptionsRef = useRef(null);
   storeRef.current = store;
 
   const withoutHistory = useCallback(async (fn) => {
@@ -217,13 +219,50 @@ export function useCalendarData() {
     [history],
   );
 
+  const pinHideViewOptions = useCallback((viewOptions, ms = 2500) => {
+    if (!viewOptions || typeof viewOptions !== 'object') return;
+    const hasHide = 'eventsHidden' in viewOptions || 'completedHidden' in viewOptions;
+    if (!hasHide) return;
+    const until = Date.now() + ms;
+    pinnedViewOptionsRef.current = {
+      ...(pinnedViewOptionsRef.current && Date.now() < pinnedViewOptionsRef.current.until
+        ? pinnedViewOptionsRef.current
+        : {}),
+      until,
+      ...(Object.prototype.hasOwnProperty.call(viewOptions, 'eventsHidden')
+        ? { eventsHidden: Boolean(viewOptions.eventsHidden) }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(viewOptions, 'completedHidden')
+        ? { completedHidden: Boolean(viewOptions.completedHidden) }
+        : {}),
+    };
+    skipRemoteRefreshUntilRef.current = Math.max(skipRemoteRefreshUntilRef.current, until);
+  }, []);
+
   const applyStore = useCallback(async (nextStore) => {
-    setStore(nextStore);
-    try {
-      await saveOfflineSnapshot(nextStore);
-    } catch {
-      /* IndexedDB cache is best-effort; do not fail the mutation */
+    let storeToApply = nextStore;
+    const pin = pinnedViewOptionsRef.current;
+    if (pin && Date.now() < pin.until && storeToApply && typeof storeToApply === 'object') {
+      storeToApply = {
+        ...storeToApply,
+        settings: {
+          ...storeToApply.settings,
+          viewOptions: {
+            ...storeToApply.settings?.viewOptions,
+            ...(pin.eventsHidden !== undefined ? { eventsHidden: pin.eventsHidden } : {}),
+            ...(pin.completedHidden !== undefined ? { completedHidden: pin.completedHidden } : {}),
+          },
+        },
+      };
+    } else if (pin && Date.now() >= pin.until) {
+      pinnedViewOptionsRef.current = null;
     }
+    // Paint first; IndexedDB must not delay hide-events / dayColors toggles.
+    storeRef.current = storeToApply;
+    setStore(storeToApply);
+    void saveOfflineSnapshot(storeToApply).catch(() => {
+      /* IndexedDB cache is best-effort; do not fail the mutation */
+    });
   }, []);
 
   const refresh = useCallback(async () => {
@@ -307,6 +346,16 @@ export function useCalendarData() {
     const unsubscribeNativeServer = onNativeEvent((data) => {
       if (data?.type === 'server-mode-changed') {
         onServerModeChanged();
+      }
+      // Defense-in-depth for the dual-WebView2 boot race: this surface's initial
+      // refresh() above may have run before it had an auth token (e.g. a persisted
+      // login surviving a PC reboot, where the DesktopHost WebView2 profile starts
+      // out with no token while the App profile already has one) and gotten back the
+      // guest/empty-events store. The native shell now also re-pushes a filtered
+      // store itself once such a surface's session resolves (see NativeBridge.cs
+      // "Host pulls shell session"), but refetch here too in case that ever misses.
+      if (data?.type === 'auth-changed' && data?.authenticated) {
+        void refresh();
       }
     });
 
@@ -505,23 +554,28 @@ export function useCalendarData() {
 
   const toggleCalendar = useCallback(
     async (id, visible) => {
-      if (store) {
+      // Optimistic eye-toggle first (settings panel + calendar grid update together).
+      const current = storeRef.current;
+      if (current) {
         await applyStore({
-          ...store,
-          calendars: store.calendars.map((c) =>
+          ...current,
+          calendars: current.calendars.map((c) =>
             c.id === id ? { ...c, visible } : c,
           ),
         });
       }
 
+      // Prefer performPatchCalendar: merges the server-projected calendar.visible and
+      // sets skipRemoteRefreshUntil so a racing store-updated / guest refresh cannot
+      // immediately undo the hide (common on DesktopHost's separate WebView profile).
       try {
-        await patchCalendar(id, { visible });
-        await refresh();
+        return await performPatchCalendar(id, { visible });
       } catch {
-        await enqueueOfflineAction({ type: 'patch-calendar', id, payload: { visible } });
+        // Keep optimistic state; offline queue is handled inside runOrQueue when applicable.
+        return null;
       }
     },
-    [applyStore, refresh, store],
+    [applyStore, performPatchCalendar],
   );
 
   const addCalendar = useCallback(
@@ -660,15 +714,44 @@ export function useCalendarData() {
 
   const updateSettings = useCallback(
     async (payload) => {
-      if (store) {
-        await applyStore({
-          ...store,
-          settings: mergeSettings(store.settings, payload),
-        });
+      const base = storeRef.current;
+      if (payload?.viewOptions) {
+        pinHideViewOptions(payload.viewOptions, 2500);
       }
-      return runOrQueue('patch-settings', () => patchSettings(payload), { payload });
+      if (base) {
+        // Paint immediately (dayColors / viewOptions toggles). Use storeRef so a stale
+        // render closure cannot merge into an older snapshot.
+        await applyStore({
+          ...base,
+          settings: mergeSettings(base.settings, payload),
+        });
+        // Ignore store-updated / in-flight refresh that still carry the pre-patch
+        // snapshot — those used to wipe optimistic dayColors for a long beat.
+        skipRemoteRefreshUntilRef.current = Math.max(
+          skipRemoteRefreshUntilRef.current,
+          Date.now() + 1500,
+        );
+      }
+      // Merge the PATCH response (settings object) — do not full-refresh the store.
+      return runOrQueue(
+        'patch-settings',
+        () => patchSettings(payload),
+        { payload },
+        (current, result) => {
+          if (result && typeof result === 'object') {
+            return {
+              ...current,
+              settings: mergeSettings(current.settings, result),
+            };
+          }
+          return {
+            ...current,
+            settings: mergeSettings(current.settings, payload),
+          };
+        },
+      );
     },
-    [applyStore, runOrQueue, store],
+    [applyStore, pinHideViewOptions, runOrQueue],
   );
 
   const syncHolidays = useCallback(async (payload = {}) => {

@@ -6,8 +6,11 @@ import {
   getAnchoredPopoverPosition,
   useAnchoredPopoverStyle,
 } from '../lib/popoverPosition.js';
+import { getEventLinks } from '../../shared/eventLinks.js';
 import { cn } from '../lib/cn.js';
 import EventAccentGlyph from './EventAccentGlyph.jsx';
+import EventAttachIcon from './EventAttachIcon.jsx';
+import EventLinkIcon from './EventLinkIcon.jsx';
 import EventTagIcons from './EventTagIcons.jsx';
 
 export default function DayEventsPopover({
@@ -25,9 +28,12 @@ export default function DayEventsPopover({
   const {
     clearPreview: clearHoverPreview,
     handleEventMouseEnter,
+    handleEventMouseMove,
   } = useEventHoverPreview({
     resetTimerOnMove: false,
     onOpen: ({ event, clientX, clientY }) => {
+      // Same pointer anchor as single-click (not the list-row rect) so detail opens
+      // in the same place for hover and click.
       (onEventHover ?? onEventDetail)?.(event, clientX, clientY, dayKey);
     },
   });
@@ -52,17 +58,26 @@ export default function DayEventsPopover({
     }
   }, []);
 
+  // Keep Escape handler on a ref so parent re-renders (new onClose identity) do not
+  // tear down this effect — the old cleanup used to clearHoverPreview() and cancel the
+  // 500ms list-row hover timer before detail could open.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
     const onKeyDown = (e) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') onCloseRef.current?.();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
-      clearHoverPreview();
-      clearClickTimer();
     };
-  }, [clearClickTimer, clearHoverPreview, onClose]);
+  }, []);
+
+  useEffect(() => () => {
+    clearHoverPreview();
+    clearClickTimer();
+  }, [clearClickTimer, clearHoverPreview]);
 
   if (!date || !anchorRect) return null;
 
@@ -70,10 +85,11 @@ export default function DayEventsPopover({
 
   return (
     <>
+      {/* List stays below EventPopover (z-50/51) so detail paints on top when both open. */}
       <div className="fixed inset-0 z-[24]" onClick={onClose} role="presentation" />
       <div
         ref={ref}
-        className="day-events-popover fixed z-[25] flex w-[min(280px,calc(100vw-24px))] flex-col overflow-hidden rounded-2xl bg-gcal-surface shadow-g-lg"
+        className="day-events-popover fixed z-[46] flex w-[min(280px,calc(100vw-24px))] flex-col overflow-hidden rounded-2xl bg-gcal-surface shadow-g-lg"
         style={style}
         role="dialog"
         aria-label={`${date.getMonth() + 1}월 ${date.getDate()}일 일정`}
@@ -93,6 +109,8 @@ export default function DayEventsPopover({
             const cal = calendars.find((c) => c.id === event.calendarId);
             const completed = Boolean(event.completed);
             const color = completed ? '#9aa0a6' : (cal?.color ?? '#f6bf26');
+            const hasLinkOrAttach = getEventLinks(event).length > 0
+              || (Array.isArray(event.attachments) && event.attachments.length > 0);
 
             return (
               <li key={`${event.id}-${dayKey}`}>
@@ -101,6 +119,9 @@ export default function DayEventsPopover({
                   className={cn('day-events-popover-item', completed && 'is-completed')}
                   onMouseEnter={(e) => {
                     handleEventMouseEnter(event, dayKey, e.currentTarget, e.clientX, e.clientY);
+                  }}
+                  onMouseMove={(e) => {
+                    handleEventMouseMove(e.clientX, e.clientY);
                   }}
                   onClick={(e) => {
                     const { clientX, clientY } = e;
@@ -126,9 +147,15 @@ export default function DayEventsPopover({
                   <EventAccentGlyph shapeId={event.markerShape} color={color} variant="dot" className="shrink-0" />
                   {label.time && <span className="shrink-0 text-gcal-muted">{label.time}</span>}
                   <EventTagIcons event={event} tags={tags} />
-                  <span className={cn('min-w-0 truncate text-gcal-heading', completed && 'line-through opacity-70')}>
+                  <span className={cn('min-w-0 flex-1 truncate text-gcal-heading', completed && 'line-through opacity-70')}>
                     {label.title}
                   </span>
+                  {hasLinkOrAttach && (
+                    <span className="event-bar-trailing">
+                      <EventLinkIcon event={event} />
+                      <EventAttachIcon event={event} />
+                    </span>
+                  )}
                 </button>
               </li>
             );

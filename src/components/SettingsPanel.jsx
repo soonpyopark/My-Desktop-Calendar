@@ -122,6 +122,18 @@ function CreateCalendarForm({ ownerName, settings, calendars, onCreateCalendar, 
   );
 }
 
+function opacityToPercent(opacity) {
+  const raw = Number(opacity);
+  const value = Number.isFinite(raw) ? raw : 1;
+  const clamped = Math.min(1, Math.max(0.05, value));
+  return Math.round(clamped * 20) * 5;
+}
+
+function percentToOpacity(percent) {
+  const stepped = Math.round(Number(percent) / 5) * 5;
+  return Math.min(1, Math.max(0.05, stepped / 100));
+}
+
 function ViewOptionsPanel({ settings, onSaveSettings }) {
   const initial = { ...DEFAULT_VIEW_OPTIONS, ...settings?.viewOptions };
   const [showWeekNumbers, setShowWeekNumbers] = useState(initial.showWeekNumbers);
@@ -129,6 +141,9 @@ function ViewOptionsPanel({ settings, onSaveSettings }) {
   const [colorScheme, setColorScheme] = useState(() => getColorScheme(initial));
   const [accentColor, setAccentColor] = useState(() => getAccentColor(initial));
   const [runAtStartup, setRunAtStartup] = useState(initial.runAtStartup !== false);
+  const [opacityPercent, setOpacityPercent] = useState(() =>
+    opacityToPercent(settings?.widget?.opacity ?? DEFAULT_SETTINGS.widget.opacity),
+  );
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -139,6 +154,7 @@ function ViewOptionsPanel({ settings, onSaveSettings }) {
     setColorScheme(getColorScheme(next));
     setAccentColor(getAccentColor(next));
     setRunAtStartup(next.runAtStartup !== false);
+    setOpacityPercent(opacityToPercent(settings?.widget?.opacity ?? DEFAULT_SETTINGS.widget.opacity));
   }, [settings]);
 
   const buildViewOptions = (patch = {}) => ({
@@ -190,6 +206,18 @@ function ViewOptionsPanel({ settings, onSaveSettings }) {
   const handleRunAtStartupChange = async (checked) => {
     setRunAtStartup(checked);
     await persistViewOptions(buildViewOptions({ runAtStartup: checked }));
+  };
+
+  const handleOpacityChange = async (percent) => {
+    const nextPercent = opacityToPercent(percentToOpacity(percent));
+    setOpacityPercent(nextPercent);
+    setSaved(false);
+    try {
+      await onSaveSettings({ widget: { opacity: percentToOpacity(nextPercent) } });
+      setSaved(true);
+    } catch {
+      /* persist failed — keep local percent for retry */
+    }
   };
 
   const themeOptions = [
@@ -250,6 +278,24 @@ function ViewOptionsPanel({ settings, onSaveSettings }) {
         </p>
         <CalendarColorPalette value={accentColor} onChange={(color) => void handleAccentColorChange(color)} />
       </fieldset>
+
+      <div className="mt-8">
+        <h3 className="mb-3 text-[22px] font-normal text-gcal-heading">투명도</h3>
+        <p className="mb-4 text-sm text-gcal-muted">메인 창의 투명도를 5% 단위로 조절합니다.</p>
+        <div className="flex items-center gap-3">
+          <input
+            type="range"
+            min={5}
+            max={100}
+            step={5}
+            value={opacityPercent}
+            onChange={(e) => void handleOpacityChange(e.target.value)}
+            className="h-2 w-full max-w-xs cursor-pointer accent-gcal-blue"
+            aria-label="투명도"
+          />
+          <span className="w-12 shrink-0 text-sm tabular-nums text-gcal-body">{opacityPercent}%</span>
+        </div>
+      </div>
 
       <div className="mt-8">
         <h3 className="mb-8 text-[22px] font-normal text-gcal-heading">프로그램 시작시 실행 모드</h3>
@@ -1265,7 +1311,12 @@ function MemberCalendarsPanel({
                         type="button"
                         className="inline-flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-full border-0 bg-transparent text-gcal-muted transition-colors hover:bg-gcal-surface-2 hover:text-gcal-heading"
                         aria-label={isVisible ? '캘린더 숨기기' : '캘린더 보이기'}
-                        onClick={() => onToggleCalendarVisibility(calendar.id)}
+                        onClick={(event) => {
+                          // Same as MyCalendarsNavList — stopPropagation so the settings
+                          // overlay's click-outside close cannot swallow the toggle.
+                          event.stopPropagation();
+                          onToggleCalendarVisibility(calendar.id);
+                        }}
                       >
                         <EyeIcon open={isVisible} />
                       </button>

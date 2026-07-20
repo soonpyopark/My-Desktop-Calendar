@@ -7,6 +7,12 @@ namespace MyDesktopCalendar.Services;
 /// <summary>
 /// DesktopHost wallpaper embed. SetParent runs once; thereafter Show/Hide only.
 /// AppWindow must never be passed here — dual-HWND flicker rule #1.
+/// The only embed technique is <see cref="EmbedSysListView32"/>: DesktopHost becomes a
+/// real <c>WS_CHILD</c> of the desktop icon ListView (SysListView32), matching the
+/// CalendarTask/desktopcal host parenting model. SetWindowPos uses parent-client
+/// coordinates once parented. If SysListView32 can never be resolved (icons hidden by
+/// policy, remote/kiosk session, shell replacement), <see cref="Embed"/> throws and the
+/// caller falls back to window mode.
 /// </summary>
 internal sealed class DesktopEmbedService
 {
@@ -34,14 +40,12 @@ internal sealed class DesktopEmbedService
     private Bounds? _lastAppliedBounds;
     private byte _alpha = 255;
     private System.Windows.Threading.DispatcherTimer? _maintenance;
-    private System.Windows.Threading.DispatcherTimer? _recompositeHeartbeat;
     private IntPtr _embedParent;
     /// <summary>
-    /// True when the *current* embed connection is the SysListView32/WS_POPUP path
-    /// (<see cref="EmbedSysListView32"/>) rather than one of the existing WS_CHILD
-    /// Progman/WorkerW paths. WS_POPUP windows always use screen coordinates in
-    /// SetWindowPos regardless of parent, so every parent-relative coordinate
-    /// conversion in this class must be skipped while this is true.
+    /// True once <see cref="EmbedSysListView32"/> has actually verified its parenting.
+    /// SysListView32/WS_CHILD is the only embed path this class has — see
+    /// <see cref="IsPopupStyleEmbed"/> — so this is false only before the first
+    /// successful embed of the process's lifetime. (Name kept for the JS/status API.)
     /// </summary>
     private bool _popupStyleEmbed;
 
@@ -55,12 +59,12 @@ internal sealed class DesktopEmbedService
     public bool IsEmbedded => IsShellParented && IsSurfaceVisible;
 
     /// <summary>
-    /// True when the current embed is the SysListView32/WS_POPUP path (see
-    /// <see cref="EmbedSysListView32"/>). Unlike the WS_CHILD Progman/WorkerW paths,
-    /// SHELLDLL_DefView does not steal clicks from this path — real mouse input reaches
-    /// WebView2 natively. Callers (e.g. <see cref="UndockZoneMonitor"/>) must not also
-    /// synthesize click-zone matching for anything the native path already delivers, or
-    /// the same click ends up double-firing.
+    /// True once actually embedded under SysListView32 as a <c>WS_CHILD</c> (see
+    /// <see cref="EmbedSysListView32"/>). The host sits in the ListView's own child
+    /// z-order (HWND_TOP), so real mouse input reaches WebView2 natively for its
+    /// client area. Callers (e.g. <see cref="UndockZoneMonitor"/>) must not also
+    /// synthesize click-zone matching for anything this native path already delivers,
+    /// or the same click ends up double-firing. Name retained for the status/JS API.
     /// </summary>
     public bool IsPopupStyleEmbed => _popupStyleEmbed;
 
@@ -81,7 +85,7 @@ internal sealed class DesktopEmbedService
         // Apply borderless styles ONCE. Never toggle during embed↔unlock (size flash source).
         ApplyStableBorderlessStyles(hwnd);
         DisableDwmTransitions(hwnd);
-        EnsureOpaqueLayeredStyle(hwnd);
+        EnsureLayeredAlpha(hwnd);
         // Do NOT call DwmExtendFrameIntoClientArea on DesktopHost. Even with zero margins it
         // can put SHELLDLL_DefView / WorkerW into a washed-out (foggy) composition on some
         // GPUs and Windows builds once the host is shell-parented. AppWindow frame theming
@@ -104,9 +108,11 @@ internal sealed class DesktopEmbedService
 
     public void SetOpacity(double opacity)
     {
-        // Window transparency feature removed — always fully opaque.
-        _ = opacity;
-        _alpha = 255;
+        var clamped = Math.Clamp(opacity, AppConstants.MinOpacity, 1.0);
+        // Snap to 5% steps so UI slider and layered alpha stay aligned.
+        clamped = Math.Round(clamped * 20.0) / 20.0;
+        clamped = Math.Clamp(clamped, AppConstants.MinOpacity, 1.0);
+        _alpha = (byte)Math.Clamp((int)Math.Round(clamped * 255.0), 13, 255);
         ApplyAlphaTree();
     }
 
@@ -200,13 +206,7 @@ internal sealed class DesktopEmbedService
             if (!parentStale)
             {
                 var target = _lockedBounds ?? GetCurrentBounds();
-                SnapMoveAndSize(target, parentRelative: !_popupStyleEmbed);
-                if (wasVisible)
-                {
-                    ForceRecomposite(_hwnd);
-                    ScheduleRecompositeRetries(_hwnd);
-                }
-
+                SnapMoveAndSize(target);
                 return;
             }
 
@@ -265,69 +265,55 @@ internal sealed class DesktopEmbedService
                 return _last;
             }
 
-            BeginSilentTransition(_hwnd);
+            ApplyAlphaTree();
+            _popupStyleEmbed = false;
+
+            var attempts = new List<object>();
             try
             {
-                ApplyAlphaTree();
-                _popupStyleEmbed = false;
-
-                var attempts = new List<object>();
-                foreach (var mode in ResolveAttemptOrder())
+                if (EmbedSysListView32(targetBounds))
                 {
-                    try
+                    SnapMoveAndSize(targetBounds);
+                    attempts.Add(new
                     {
-                        if (TryEmbed(mode, targetBounds))
-                        {
-                            SnapMoveAndSize(
-                                targetBounds,
-                                parentRelative: !_popupStyleEmbed && mode == "auto");
-                            attempts.Add(new
-                            {
-                                mode,
-                                ok = true,
-                                parent = _embedParent.ToInt64(),
-                                ancestor = Win32.GetAncestor(_hwnd, Win32.GA_PARENT).ToInt64(),
-                            });
-                            IsShellParented = true;
-                            IsSurfaceVisible = true;
-                            Win32.ShowWindow(_hwnd, Win32.SW_SHOW);
-                            ForceRecomposite(_hwnd);
-                            ScheduleRecompositeRetries(_hwnd);
-                            _last = new EmbedInfo(
-                                true,
-                                mode,
-                                "auto",
-                                "parent",
-                                attempts,
-                                DateTime.UtcNow.ToString("o"));
-                            StartMaintenance(targetBounds);
-                            return _last;
-                        }
+                        mode = "syslistview32",
+                        ok = true,
+                        parent = _embedParent.ToInt64(),
+                        ancestor = Win32.GetAncestor(_hwnd, Win32.GA_PARENT).ToInt64(),
+                    });
+                    IsShellParented = true;
+                    IsSurfaceVisible = true;
+                    Win32.ShowWindow(_hwnd, Win32.SW_SHOW);
 
-                        attempts.Add(new
-                        {
-                            mode,
-                            ok = false,
-                            error = "unavailable",
-                            ancestor = Win32.GetAncestor(_hwnd, Win32.GA_PARENT).ToInt64(),
-                            getParent = Win32.GetParent(_hwnd).ToInt64(),
-                        });
-                    }
-                    catch (Exception ex)
-                    {
-                        attempts.Add(new { mode, ok = false, error = ex.Message });
-                    }
+                    _last = new EmbedInfo(
+                        true,
+                        "syslistview32",
+                        "auto",
+                        "parent",
+                        attempts,
+                        DateTime.UtcNow.ToString("o"));
+                    StartMaintenance(targetBounds);
+                    return _last;
                 }
 
-                _last = new EmbedInfo(false, null, "auto", "none", attempts, DateTime.UtcNow.ToString("o"));
-                var caps = DetectCapabilities();
-                throw new InvalidOperationException(
-                    $"Desktop embed failed. Caps={caps}. Attempts: {string.Join("; ", attempts)}");
+                attempts.Add(new
+                {
+                    mode = "syslistview32",
+                    ok = false,
+                    error = "unavailable",
+                    ancestor = Win32.GetAncestor(_hwnd, Win32.GA_PARENT).ToInt64(),
+                    getParent = Win32.GetParent(_hwnd).ToInt64(),
+                });
             }
-            finally
+            catch (Exception ex)
             {
-                EndSilentTransition(_hwnd);
+                attempts.Add(new { mode = "syslistview32", ok = false, error = ex.Message });
             }
+
+            _last = new EmbedInfo(false, null, "auto", "none", attempts, DateTime.UtcNow.ToString("o"));
+            var caps = DetectCapabilities();
+            throw new InvalidOperationException(
+                $"Desktop embed failed. Caps={caps}. Attempts: {string.Join("; ", attempts)}");
         }
     }
 
@@ -373,6 +359,57 @@ internal sealed class DesktopEmbedService
         }
     }
 
+    /// <summary>
+    /// Fully detach DesktopHost from the shell and drop HWND ownership so the Host
+    /// WebView2 process tree can be disposed (single-WebView memory policy).
+    /// Next desktop enter must <see cref="Attach"/> a new HWND and <see cref="Embed"/> again.
+    /// </summary>
+    public void ReleaseShellHost()
+    {
+        lock (_gate)
+        {
+            StopMaintenance();
+            if (_hwnd != IntPtr.Zero && Win32.IsWindow(_hwnd))
+            {
+                try
+                {
+                    Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
+                }
+                catch
+                {
+                    /* ignore */
+                }
+
+                if (IsShellParented)
+                {
+                    try
+                    {
+                        Win32.SetParent(_hwnd, IntPtr.Zero);
+                    }
+                    catch
+                    {
+                        /* ignore */
+                    }
+                }
+            }
+
+            IsShellParented = false;
+            IsSurfaceVisible = false;
+            _popupStyleEmbed = false;
+            _embedParent = IntPtr.Zero;
+            _hwnd = IntPtr.Zero;
+            _hostWindow = null;
+            _lastAppliedBounds = null;
+            _last = new EmbedInfo(
+                false,
+                null,
+                "auto",
+                "none",
+                [],
+                DateTime.UtcNow.ToString("o"));
+        }
+    }
+
     private void ShowSurfaceUnlocked(Bounds targetBounds)
     {
         if (_hwnd == IntPtr.Zero || !Win32.IsWindow(_hwnd))
@@ -392,83 +429,11 @@ internal sealed class DesktopEmbedService
         // (the common case on settings/quick-edit resume — Host was only hidden, never moved).
         if (_lastAppliedBounds != targetBounds)
         {
-            SnapMoveAndSize(targetBounds, parentRelative: !_popupStyleEmbed && IsShellParented && _embedParent != IntPtr.Zero);
+            SnapMoveAndSize(targetBounds);
         }
 
         IsSurfaceVisible = true;
         ApplyAlphaTree();
-        ForceRecomposite(_hwnd);
-        ScheduleRecompositeRetries(_hwnd);
-    }
-
-    /// <summary>
-    /// DWM occasionally fails to recomposite a WS_CHILD WebView2 host after an SW_HIDE →
-    /// SW_SHOW cycle under Progman/WorkerW (both use the "no redirection bitmap" desktop
-    /// optimization — see capabilities.progmanNoRedirectionBitmap) — the window/children stay
-    /// genuinely IsWindowVisible=true, correctly parented and positioned (confirmed via
-    /// WindowFromPoint/EnumChildWindows), yet nothing paints on screen (invisible calendar,
-    /// e.g. right after login resumes desktop mode). A plain repaint or move doesn't fix it;
-    /// only an explicit RedrawWindow + a no-op SetWindowPos with SWP_FRAMECHANGED reliably
-    /// forces DWM to recomposite the surface. Cheap and safe to call on every show.
-    /// </summary>
-    private static void ForceRecomposite(IntPtr hwnd)
-    {
-        if (hwnd == IntPtr.Zero || !Win32.IsWindow(hwnd))
-        {
-            return;
-        }
-
-        try
-        {
-            Win32.RedrawWindow(
-                hwnd,
-                IntPtr.Zero,
-                IntPtr.Zero,
-                Win32.RDW_INVALIDATE | Win32.RDW_ERASE | Win32.RDW_ALLCHILDREN | Win32.RDW_UPDATENOW | Win32.RDW_FRAME);
-            Win32.SetWindowPos(
-                hwnd,
-                IntPtr.Zero,
-                0,
-                0,
-                0,
-                0,
-                Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE | Win32.SWP_FRAMECHANGED);
-        }
-        catch
-        {
-            /* ignore — best-effort repaint nudge */
-        }
-    }
-
-    /// <summary>
-    /// The immediate <see cref="ForceRecomposite"/> call can land before WebView2's own
-    /// compositor has produced a fresh frame after being hidden for a while (e.g. during a
-    /// real login: suspend → type credentials → submit → refresh() reloads the store → resume
-    /// — several seconds, not the near-instant hide/show this was first verified against),
-    /// so DWM has nothing new to show yet and the calendar stays invisible until *something
-    /// else* happens to repaint (observed: reappears "after a while" — really the 5s
-    /// maintenance tick incidentally forcing it). Re-fire a few short-delay follow-ups on the
-    /// UI thread so one of them lands after the first real frame is ready, without waiting on
-    /// the maintenance timer.
-    /// </summary>
-    private void ScheduleRecompositeRetries(IntPtr hwnd)
-    {
-        foreach (var delayMs in new[] { 120, 350, 800, 1600 })
-        {
-            var timer = new System.Windows.Threading.DispatcherTimer
-            {
-                Interval = TimeSpan.FromMilliseconds(delayMs),
-            };
-            timer.Tick += (sender, _) =>
-            {
-                ((System.Windows.Threading.DispatcherTimer)sender!).Stop();
-                if (IsShellParented && IsSurfaceVisible && hwnd == _hwnd)
-                {
-                    ForceRecomposite(hwnd);
-                }
-            };
-            timer.Start();
-        }
     }
 
     /// <summary>
@@ -531,7 +496,7 @@ internal sealed class DesktopEmbedService
             ["editMode"] = !IsEmbedded,
             ["dualHwnd"] = true,
             ["platform"] = "wpf-native",
-            // SysListView32/WS_POPUP embed — lets the renderer know real clicks reach its
+            // SysListView32/WS_CHILD embed — lets the renderer know real clicks reach its
             // own DOM directly (see Header.jsx withUiSuspend's Settings-in-place branch).
             ["popupStyleEmbed"] = _popupStyleEmbed,
             ["opacity"] = GetOpacity(),
@@ -548,33 +513,39 @@ internal sealed class DesktopEmbedService
         };
     }
 
-    private bool TryEmbed(string mode, Bounds bounds)
+    /// <summary>
+    /// True when the SysListView32/WS_CHILD path's shell targets (Progman → DefView →
+    /// SysListView32) can currently be resolved, with no side effects on <c>_hwnd</c>.
+    /// Immediately after a fresh login/reboot our own auto-start commonly wins the race
+    /// against Explorer still building the desktop icon list, so the very first boot embed
+    /// can find nothing here and <see cref="Embed"/> throws (no other embed path exists —
+    /// see this class's summary). Callers (see DesktopSurfaceController's boot wait) use
+    /// this to poll briefly before committing to the first <see cref="Embed"/> call.
+    /// </summary>
+    public static bool IsSysListView32Ready()
     {
-        return mode switch
+        var progman = FindProgman();
+        if (progman == IntPtr.Zero)
         {
-            "syslistview32" => EmbedSysListView32(bounds),
-            "auto" => EmbedAuto(bounds),
-            _ => false,
-        };
+            return false;
+        }
+
+        SpawnWorkerW(progman);
+
+        var defView = FindDefViewUnder(progman);
+        if (defView == IntPtr.Zero)
+        {
+            defView = FindDesktopDefView();
+        }
+
+        if (defView == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        return Win32.FindWindowExW(defView, IntPtr.Zero, "SysListView32", null) != IntPtr.Zero;
     }
 
-    /// <summary>
-    /// v1.1.6 experiment, tried first in the Auto attempt order: parent DesktopHost
-    /// *inside* SysListView32 (the desktop icon ListView, a child of SHELLDLL_DefView)
-    /// instead of as a Progman/WorkerW sibling like every other strategy in this class.
-    /// Live testing showed SHELLDLL_DefView only intercepts clicks meant for its
-    /// sibling windows — once we're a genuine child of its own SysListView32 control,
-    /// real mouse input reaches WebView2 natively, without <c>UndockZoneMonitor</c>'s
-    /// click-zone polling.
-    /// Requires WS_POPUP (see <see cref="PrepareAsPopupChild"/>), not WS_CHILD: WS_POPUP
-    /// windows always use screen (not parent-relative) coordinates in SetWindowPos
-    /// regardless of parent, which is what let xdiary reposition without ever
-    /// detaching. Every parent-relative computation elsewhere in this class is gated
-    /// on <see cref="_popupStyleEmbed"/> so it never runs for this path.
-    /// Automatically falls back to the existing, Win11-24H2-safe WS_CHILD chain
-    /// (raised/workerw/progman) via <see cref="ResolveAttemptOrder"/> when this
-    /// doesn't verify — untouched by this change.
-    /// </summary>
     private bool EmbedSysListView32(Bounds screenBounds)
     {
         var progman = FindProgman();
@@ -603,20 +574,20 @@ internal sealed class DesktopEmbedService
         }
 
         ApplyAlphaTree();
-        PrepareAsPopupChild(_hwnd);
+        PrepareAsListViewChild(_hwnd);
         Win32.SetParent(_hwnd, listView);
         _embedParent = listView;
 
-        // WS_POPUP ignores parent-relative client offsets — always absolute screen
-        // coordinates. Raise to the top of the ListView's own child z-order so the
-        // surface sits above the desktop icons it now lives among.
+        // WS_CHILD SetWindowPos is parent-client relative. Raise to the top of the
+        // ListView's own child z-order so the surface sits above the desktop icons.
+        var client = ScreenToParentClient(screenBounds);
         Win32.SetWindowPos(
             _hwnd,
             Win32.HWND_TOP,
-            screenBounds.X,
-            screenBounds.Y,
-            screenBounds.Width,
-            screenBounds.Height,
+            client.X,
+            client.Y,
+            client.Width,
+            client.Height,
             Win32.SWP_NOACTIVATE | Win32.SWP_FRAMECHANGED | Win32.SWP_NOREDRAW);
 
         ApplyAlphaTree();
@@ -625,88 +596,6 @@ internal sealed class DesktopEmbedService
         var verified = IsParentedTo(_hwnd, listView);
         _popupStyleEmbed = verified;
         return verified;
-    }
-
-    /// <summary>
-    /// Cross-version entry: Win11 24H2+ → Progman raised; older → WorkerW sibling; last resort Progman.
-    /// WPF outer HWND is the stable reparent target (WebView2 stays a WPF child).
-    /// </summary>
-    private bool EmbedAuto(Bounds bounds)
-    {
-        var progman = FindProgman();
-        if (progman == IntPtr.Zero)
-        {
-            return false;
-        }
-
-        SpawnWorkerW(progman);
-
-        if (IsModernDesktopComposition(progman))
-        {
-            return EmbedModernRaised(bounds);
-        }
-
-        var classicWorker = FindClassicSiblingWorkerW();
-        if (classicWorker != IntPtr.Zero && EmbedToShellParent(classicWorker, bounds))
-        {
-            return true;
-        }
-
-        var childWorker = FindWorkerWChild(progman);
-        if (childWorker != IntPtr.Zero && EmbedToShellParent(childWorker, bounds))
-        {
-            return true;
-        }
-
-        return EmbedModernRaised(bounds);
-    }
-
-    private bool EmbedModernRaised(Bounds screenBounds)
-    {
-        var progman = FindProgman();
-        if (progman == IntPtr.Zero)
-        {
-            return false;
-        }
-
-        SpawnWorkerW(progman);
-        return EmbedToShellParent(progman, screenBounds);
-    }
-
-    /// <summary>
-    /// WS_CHILD fallback used only when the SysListView32 path (<see cref="EmbedSysListView32"/>)
-    /// can't be found/verified. No Z-order enforcement — the abandoned "calendar behind icons"
-    /// goal used to fight the shell's Z-order here; this just leaves whatever stacking SetParent
-    /// itself produces.
-    /// </summary>
-    private bool EmbedToShellParent(IntPtr parent, Bounds screenBounds)
-    {
-        if (parent == IntPtr.Zero || _hwnd == IntPtr.Zero)
-        {
-            return false;
-        }
-
-        ApplyAlphaTree();
-        // Avoid ShowWindow during re-embed — it can flash a blank frame.
-
-        var local = ScreenToParentClient(parent, screenBounds);
-        PrepareAsDesktopChild(_hwnd);
-        Win32.SetParent(_hwnd, parent);
-        _embedParent = parent;
-
-        // First attach: set position + size (DesktopHost boots tiny off-screen).
-        Win32.SetWindowPos(
-            _hwnd,
-            IntPtr.Zero,
-            local.X,
-            local.Y,
-            screenBounds.Width,
-            screenBounds.Height,
-            Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE | Win32.SWP_FRAMECHANGED | Win32.SWP_NOREDRAW);
-
-        ApplyAlphaTree();
-        TryRefreshShellDesktopComposition(parent);
-        return IsParentedTo(_hwnd, parent);
     }
 
     /// <summary>
@@ -766,17 +655,9 @@ internal sealed class DesktopEmbedService
                 {
                     try
                     {
-                        if (_popupStyleEmbed)
-                        {
-                            PrepareAsPopupChild(_hwnd);
-                        }
-                        else
-                        {
-                            PrepareAsDesktopChild(_hwnd);
-                        }
-
+                        PrepareAsListViewChild(_hwnd);
                         Win32.SetParent(_hwnd, _embedParent);
-                        SnapMoveOnly(bounds, parentRelative: !_popupStyleEmbed);
+                        SnapMoveOnly(bounds);
                     }
                     catch
                     {
@@ -784,24 +665,20 @@ internal sealed class DesktopEmbedService
                     }
                 }
 
-                // Keep geometry in sync without touching Z-order — SysListView32/WS_POPUP
-                // embeds always use screen coordinates; the WS_CHILD fallback needs
-                // parent-relative coordinates converted.
+                // WS_CHILD uses parent-client coordinates (see SnapMoveOnly).
                 if (_lastAppliedBounds != bounds)
                 {
-                    SnapMoveOnly(bounds, parentRelative: !_popupStyleEmbed);
+                    SnapMoveOnly(bounds);
                 }
             }
 
             ApplyAlphaTree();
         };
         _maintenance.Start();
-        StartRecompositeHeartbeat();
     }
 
     private void StopMaintenance()
     {
-        StopRecompositeHeartbeat();
         if (_maintenance is null)
         {
             return;
@@ -809,58 +686,6 @@ internal sealed class DesktopEmbedService
 
         _maintenance.Stop();
         _maintenance = null;
-    }
-
-    /// <summary>
-    /// The Progman/WorkerW desktop-icon-layer trick occasionally drops composition of this
-    /// WS_CHILD host spontaneously mid-session — not just after an explicit hide/show cycle
-    /// (<see cref="ScheduleRecompositeRetries"/> covers that case) — observed more readily on
-    /// hybrid-GPU / mixed-monitor rigs where DWM's "no redirection bitmap" desktop optimization
-    /// is more prone to skipping a recomposite. Rather than wait up to 5s for the parenting/
-    /// z-order maintenance tick to incidentally fix it, run a separate, cheap (RedrawWindow +
-    /// no-op SetWindowPos only — no z-order/parent touching, so no DefView/icon flash risk)
-    /// nudge on a tighter cadence for as long as the surface is supposed to be visible.
-    /// </summary>
-    private void StartRecompositeHeartbeat()
-    {
-        StopRecompositeHeartbeat();
-        _recompositeHeartbeat = new System.Windows.Threading.DispatcherTimer
-        {
-            Interval = TimeSpan.FromSeconds(1.5),
-        };
-        _recompositeHeartbeat.Tick += (_, _) =>
-        {
-            if (IsShellParented && IsSurfaceVisible && _hwnd != IntPtr.Zero && Win32.IsWindow(_hwnd))
-            {
-                ForceRecomposite(_hwnd);
-            }
-        };
-        _recompositeHeartbeat.Start();
-    }
-
-    private void StopRecompositeHeartbeat()
-    {
-        if (_recompositeHeartbeat is null)
-        {
-            return;
-        }
-
-        _recompositeHeartbeat.Stop();
-        _recompositeHeartbeat = null;
-    }
-
-    /// <summary>
-    /// Prefer SWP_NOREDRAW only. WM_SETREDRAW blanks WebView2's Chromium surface
-    /// and is a common flash source (see WebView2 feedback / WPF host notes).
-    /// </summary>
-    private static void BeginSilentTransition(IntPtr hwnd)
-    {
-        _ = hwnd;
-    }
-
-    private static void EndSilentTransition(IntPtr hwnd)
-    {
-        _ = hwnd;
     }
 
     private static void DisableDwmTransitions(IntPtr hwnd)
@@ -879,33 +704,15 @@ internal sealed class DesktopEmbedService
     }
 
     /// <summary>
-    /// WPF keeps WS_POPUP; GetParent then returns the owner (often 0), not the real parent.
-    /// Always verify with GetAncestor(GA_PARENT). Also force WS_CHILD before SetParent (Win11 24H2+).
+    /// Style prep for the SysListView32 embed path (see <see cref="EmbedSysListView32"/>).
+    /// Makes DesktopHost a real <c>WS_CHILD</c> of the ListView (CalendarTask/desktopcal
+    /// host model). Clears <c>WS_POPUP</c> so SetWindowPos is parent-client relative.
     /// </summary>
-    private static void PrepareAsDesktopChild(IntPtr hwnd)
+    private static void PrepareAsListViewChild(IntPtr hwnd)
     {
         var style = Win32.GetWindowLongPtrCompat(hwnd, Win32.GWL_STYLE).ToInt64();
-        style |= Win32.WS_CHILD | Win32.WS_VISIBLE | Win32.WS_THICKFRAME;
-        style &= ~unchecked((long)Win32.WS_POPUP);
-        style &= ~(Win32.WS_CAPTION | Win32.WS_SYSMENU | Win32.WS_MINIMIZEBOX | Win32.WS_MAXIMIZEBOX);
-        Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_STYLE, new IntPtr(style));
-
-        // About to SetParent under the shell — do not keep WS_EX_LAYERED (desktop haze).
-        ClearLayeredStyle(hwnd);
-    }
-
-    /// <summary>
-    /// Style prep for the SysListView32 embed path only (see <see cref="EmbedSysListView32"/>).
-    /// Unlike <see cref="PrepareAsDesktopChild"/>, this deliberately KEEPS WS_POPUP and clears
-    /// WS_CHILD — SysListView32 is a real system control with its own message/paint handling,
-    /// and reparenting a WS_CHILD window into it produced inconsistent input routing during
-    /// testing. WS_POPUP is what makes SetWindowPos use absolute screen coordinates here.
-    /// </summary>
-    private static void PrepareAsPopupChild(IntPtr hwnd)
-    {
-        var style = Win32.GetWindowLongPtrCompat(hwnd, Win32.GWL_STYLE).ToInt64();
-        style |= unchecked((long)Win32.WS_POPUP) | Win32.WS_VISIBLE;
-        style &= ~Win32.WS_CHILD;
+        style |= Win32.WS_CHILD | Win32.WS_VISIBLE | Win32.WS_CLIPSIBLINGS | Win32.WS_CLIPCHILDREN;
+        style &= unchecked((long)~(uint)Win32.WS_POPUP);
         style &= ~(Win32.WS_CAPTION | Win32.WS_SYSMENU | Win32.WS_MINIMIZEBOX | Win32.WS_MAXIMIZEBOX | Win32.WS_THICKFRAME);
         Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_STYLE, new IntPtr(style));
 
@@ -913,15 +720,24 @@ internal sealed class DesktopEmbedService
         ClearLayeredStyle(hwnd);
     }
 
-    private static void RestoreAsTopLevel(IntPtr hwnd)
+    /// <summary>
+    /// Convert screen bounds to <see cref="_embedParent"/> client coordinates for
+    /// <c>WS_CHILD</c> SetWindowPos. Falls back to the input when the parent is missing.
+    /// </summary>
+    private Bounds ScreenToParentClient(Bounds screen)
     {
-        var style = Win32.GetWindowLongPtrCompat(hwnd, Win32.GWL_STYLE).ToInt64();
-        style |= unchecked((long)Win32.WS_POPUP) | Win32.WS_VISIBLE | Win32.WS_THICKFRAME;
-        style &= ~Win32.WS_CHILD;
-        style &= ~(Win32.WS_CAPTION | Win32.WS_SYSMENU | Win32.WS_MINIMIZEBOX | Win32.WS_MAXIMIZEBOX);
-        Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_STYLE, new IntPtr(style));
+        if (_embedParent == IntPtr.Zero || !Win32.IsWindow(_embedParent))
+        {
+            return screen;
+        }
 
-        EnsureOpaqueLayeredStyle(hwnd);
+        var origin = new Win32.POINT { X = screen.X, Y = screen.Y };
+        if (!Win32.ScreenToClient(_embedParent, ref origin))
+        {
+            return screen;
+        }
+
+        return new Bounds(origin.X, origin.Y, screen.Width, screen.Height);
     }
 
     private static bool IsParentedTo(IntPtr hwnd, IntPtr expectedParent)
@@ -942,10 +758,10 @@ internal sealed class DesktopEmbedService
     }
 
     /// <summary>
-    /// Top-level / parked Host: opaque WS_EX_LAYERED (alpha 255). Under the shell this can
-    /// wash wallpaper+icons on some GPUs — use <see cref="ClearLayeredStyle"/> once parented.
+    /// Apply <c>WS_EX_LAYERED</c> + <see cref="_alpha"/> via SetLayeredWindowAttributes (LWA_ALPHA).
+    /// Fully opaque hosts under the shell drop layered style instead — see <see cref="ApplyAlphaTree"/>.
     /// </summary>
-    private static void EnsureOpaqueLayeredStyle(IntPtr hwnd)
+    private void EnsureLayeredAlpha(IntPtr hwnd)
     {
         if (hwnd == IntPtr.Zero || !Win32.IsWindow(hwnd))
         {
@@ -958,7 +774,7 @@ internal sealed class DesktopEmbedService
             Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE, new IntPtr(ex | Win32.WS_EX_LAYERED));
         }
 
-        _ = Win32.SetLayeredWindowAttributes(hwnd, 0, 255, Win32.LWA_ALPHA);
+        _ = Win32.SetLayeredWindowAttributes(hwnd, 0, _alpha, Win32.LWA_ALPHA);
     }
 
     /// <summary>
@@ -998,30 +814,25 @@ internal sealed class DesktopEmbedService
         }
 
         // Never DwmExtendFrameIntoClientArea on DesktopHost (washes the shell).
-        // Once shell-parented, also drop WS_EX_LAYERED — opaque layered under DefView
-        // still fogs wallpaper/icons on a subset of GPU/driver builds.
-        if (_embedParent != IntPtr.Zero || IsShellParented)
+        // Fully opaque + shell-parented: drop WS_EX_LAYERED — opaque layered under
+        // DefView still fogs wallpaper/icons on a subset of GPU/driver builds.
+        // Translucent: keep layered alpha so the calendar can see through wallpaper.
+        var shellParented = _embedParent != IntPtr.Zero || IsShellParented;
+        if (shellParented && _alpha >= 255)
         {
             ClearLayeredStyle(_hwnd);
         }
         else
         {
-            EnsureOpaqueLayeredStyle(_hwnd);
+            EnsureLayeredAlpha(_hwnd);
         }
-    }
-
-    private static void ApplyAlpha(IntPtr hwnd, byte alpha)
-    {
-        // Kept for API compatibility; constant-alpha mode is intentionally unused.
-        _ = hwnd;
-        _ = alpha;
     }
 
     /// <summary>
     /// Stable borderless styles applied once at attach — never toggled on embed/unlock.
     /// Keep WS_THICKFRAME so WPF CanResize still works in window mode.
     /// </summary>
-    private static void ApplyStableBorderlessStyles(IntPtr hwnd)
+    private void ApplyStableBorderlessStyles(IntPtr hwnd)
     {
         var style = Win32.GetWindowLongPtrCompat(hwnd, Win32.GWL_STYLE).ToInt64();
         style |= Win32.WS_POPUP | Win32.WS_VISIBLE | Win32.WS_THICKFRAME;
@@ -1033,77 +844,65 @@ internal sealed class DesktopEmbedService
         ex |= Win32.WS_EX_TOOLWINDOW | Win32.WS_EX_LAYERED;
         ex &= ~(Win32.WS_EX_APPWINDOW | Win32.WS_EX_NOACTIVATE);
         Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE, new IntPtr(ex));
-        _ = Win32.SetLayeredWindowAttributes(hwnd, 0, 255, Win32.LWA_ALPHA);
+        _ = Win32.SetLayeredWindowAttributes(hwnd, 0, _alpha, Win32.LWA_ALPHA);
     }
 
-    private static Bounds ScreenToParentClient(IntPtr parent, Bounds screen)
-    {
-        var pt = new Win32.POINT { X = screen.X, Y = screen.Y };
-        if (!Win32.ScreenToClient(parent, ref pt))
-        {
-            return screen;
-        }
+    /// <summary>
+    /// True when <see cref="_hwnd"/> is a real <c>WS_CHILD</c> of <see cref="_embedParent"/>
+    /// — SetWindowPos must then use parent-client coordinates. Prefer this over
+    /// <see cref="IsShellParented"/> so the first Snap after SetParent (before the
+    /// flag flips) still converts correctly.
+    /// </summary>
+    private bool UsesParentClientCoords =>
+        _embedParent != IntPtr.Zero
+        && Win32.IsWindow(_embedParent)
+        && IsParentedTo(_hwnd, _embedParent);
 
-        return new Bounds(pt.X, pt.Y, screen.Width, screen.Height);
-    }
-
-    /// <summary>Reposition without changing size (eliminates transition flash).</summary>
-    private void SnapMoveOnly(Bounds screen, bool parentRelative)
+    /// <summary>
+    /// Reposition without changing size (eliminates transition flash).
+    /// When shell-parented as <c>WS_CHILD</c>, converts screen bounds to parent-client.
+    /// </summary>
+    private void SnapMoveOnly(Bounds screen)
     {
         if (_hwnd == IntPtr.Zero)
         {
             return;
         }
 
-        int x = screen.X;
-        int y = screen.Y;
-        if (parentRelative && _embedParent != IntPtr.Zero)
-        {
-            var local = ScreenToParentClient(_embedParent, screen);
-            x = local.X;
-            y = local.Y;
-        }
-
+        var pos = UsesParentClientCoords ? ScreenToParentClient(screen) : screen;
         Win32.SetWindowPos(
             _hwnd,
             IntPtr.Zero,
-            x,
-            y,
+            pos.X,
+            pos.Y,
             0,
             0,
             Win32.SWP_NOSIZE | Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE);
     }
 
     /// <summary>Place host at screen bounds with explicit size (first attach / host boot).</summary>
-    private void SnapMoveAndSize(Bounds screen, bool parentRelative)
+    private void SnapMoveAndSize(Bounds screen)
     {
         if (_hwnd == IntPtr.Zero)
         {
             return;
         }
 
-        int x = screen.X;
-        int y = screen.Y;
-        if (parentRelative && _embedParent != IntPtr.Zero)
-        {
-            var local = ScreenToParentClient(_embedParent, screen);
-            x = local.X;
-            y = local.Y;
-        }
-
+        var pos = UsesParentClientCoords ? ScreenToParentClient(screen) : screen;
         Win32.SetWindowPos(
             _hwnd,
             IntPtr.Zero,
-            x,
-            y,
-            screen.Width,
-            screen.Height,
+            pos.X,
+            pos.Y,
+            pos.Width,
+            pos.Height,
             Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE);
 
         if (_hostWindow is not null)
         {
             try
             {
+                // WPF Left/Top are still screen-space regardless of Win32 child parenting.
                 WindowFootprint.Sync(_hostWindow, screen);
             }
             catch
@@ -1119,15 +918,6 @@ internal sealed class DesktopEmbedService
     {
         return new Bounds(b.X, b.Y, Math.Max(200, b.Width), Math.Max(150, b.Height));
     }
-
-    /// <summary>
-    /// Fixed attempt order — no user-selectable strategy. Prefer SysListView32/WS_POPUP
-    /// first: it parents *inside* the icon ListView itself, so real mouse input reaches
-    /// WebView2 natively (no <see cref="UndockZoneMonitor"/> click-zone polling needed).
-    /// Falls back to the single WS_CHILD chain (<see cref="EmbedAuto"/>, itself cross-version
-    /// aware) when SysListView32 can't be found/verified.
-    /// </summary>
-    private static IEnumerable<string> ResolveAttemptOrder() => ["syslistview32", "auto"];
 
     private static IntPtr FindProgman()
     {
