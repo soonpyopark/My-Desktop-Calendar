@@ -61,11 +61,13 @@ const MonthWeekRow = memo(function MonthWeekRow({
   dayColors,
   interactive = true,
   completedHidden = false,
+  /** Wallpaper desktop mode — event-bar single-click is a no-op. */
+  desktopEmbedded = false,
 }) {
   const weekStart = week[0].date;
   const moreHoverTimerRef = useRef(null);
   const eventClickTimerRef = useRef(null);
-  const hostSurface = isDesktopSurfaceHost();
+  const hostSurface = desktopEmbedded;
 
   const clearMoreHoverTimer = useCallback(() => {
     if (moreHoverTimerRef.current) {
@@ -109,9 +111,9 @@ const MonthWeekRow = memo(function MonthWeekRow({
         const sortedSegments = daySegments
           .slice()
           .sort((a, b) => (a.lane - b.lane) || compareEventsForDayDisplay(a.event, b.event, dayKey));
-        // Completed-hide: omit completed from capacity/더보기, but keep layout `lane` on
-        // remaining bars so they do not jump when the toggle flips (CSS also hides any
-        // completed that remain mounted in-range).
+        // weekLayout already excludes completed events entirely when completedHidden is
+        // true (see MonthView's weekLayouts memo), so lanes are compact with no gap.
+        // This filter is just a defensive no-op guard against stale segments.
         const uiSegments = completedHidden
           ? sortedSegments.filter((segment) => !segment.event?.completed)
           : sortedSegments;
@@ -327,6 +329,39 @@ export default function MonthView({
   const scrollAnchorRef = useRef(viewDate);
   const viewDateRef = useRef(viewDate);
   const [scrollAnchorVersion, setScrollAnchorVersion] = useState(0);
+  const [desktopEmbedded, setDesktopEmbedded] = useState(() => isDesktopSurfaceHost());
+
+  useEffect(() => {
+    if (!isNeutralinoDesktopShell()) {
+      setDesktopEmbedded(false);
+      return undefined;
+    }
+    let cancelled = false;
+    const sync = async () => {
+      try {
+        const status = await window.myCalendar?.getWidgetStatus?.();
+        if (!cancelled) {
+          setDesktopEmbedded(Boolean(status?.embedded));
+        }
+      } catch {
+        if (!cancelled) setDesktopEmbedded(isDesktopSurfaceHost());
+      }
+    };
+    void sync();
+    const onStatus = (event) => {
+      const embedded = event?.detail?.embedded;
+      if (typeof embedded === 'boolean') {
+        setDesktopEmbedded(embedded);
+        return;
+      }
+      void sync();
+    };
+    window.addEventListener('mycalendar:widgetStatusChanged', onStatus);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('mycalendar:widgetStatusChanged', onStatus);
+    };
+  }, []);
   viewDateRef.current = viewDate;
   const hasInitialScrollRef = useRef(false);
   const prevViewMonthRef = useRef('');
@@ -371,14 +406,20 @@ export default function MonthView({
   );
 
   const weekLayouts = useMemo(() => {
+    // Exclude completed events from layout entirely (not just visually) when hidden,
+    // so remaining bars are re-assigned compact lanes instead of leaving a blank gap
+    // where the hidden completed bar used to sit.
+    const laidOutEvents = completedHidden
+      ? events.filter((event) => !event?.completed)
+      : events;
     /** @type {Map<string, Record<string, object[]>>} */
     const layouts = new Map();
     for (const week of weeks) {
       const weekStartKey = toDateKey(week[0].date);
-      layouts.set(weekStartKey, buildWeekEventLayout(week, events, tags));
+      layouts.set(weekStartKey, buildWeekEventLayout(week, laidOutEvents, tags));
     }
     return layouts;
-  }, [weeks, events, tags]);
+  }, [weeks, events, tags, completedHidden]);
 
   const {
     clearPreview: clearHoverPreview,
@@ -745,33 +786,11 @@ export default function MonthView({
         // Keep zones while temporarily unlocked so the next day double-click still works.
         embedded = Boolean(status?.embedded || status?.embedSuspended)
           && !status?.editMode;
-        // App WebView must not overwrite DesktopHost create/edit zones while wallpaper is active.
-        try {
-          const surface = new URLSearchParams(window.location.search).get('surface');
-          if (surface !== 'desktop' && status?.embedded && !status?.embedSuspended) {
-            embedded = false;
-            return;
-          }
-        } catch {
-          /* ignore */
-        }
       } catch {
         embedded = false;
       }
       if (cancelled) return;
       if (!embedded) {
-        // Only clear when this surface owns reporting (desktop host, or unlocked app).
-        try {
-          const surface = new URLSearchParams(window.location.search).get('surface');
-          if (surface !== 'desktop') {
-            const status = await window.myCalendar.getWidgetStatus?.();
-            if (status?.embedded && !status?.embedSuspended) {
-              return;
-            }
-          }
-        } catch {
-          /* ignore */
-        }
         void window.myCalendar.clearCreateEventZones?.();
         void window.myCalendar.clearEditEventZones?.();
         return;
@@ -856,6 +875,7 @@ export default function MonthView({
               onMoreHoverStart={handleMoreHoverStart}
               dayColors={dayColors}
               completedHidden={completedHidden}
+              desktopEmbedded={desktopEmbedded}
             />
           );
         })}

@@ -4,33 +4,8 @@ import { cn } from '../lib/cn.js';
 import { APP_NAME, APP_VERSION } from '../../shared/constants.js';
 import { addDays, startOfWeek, toDateKey } from '../lib/calendarUtils.js';
 import { openExternalUrl } from '../lib/openExternal.js';
-import { isDesktopSurfaceHost, isNeutralinoDesktopShell } from '../lib/isNeutralinoDesktopShell.js';
+import { isNeutralinoDesktopShell } from '../lib/isNeutralinoDesktopShell.js';
 import { useAppDialog } from './AppDialogProvider.jsx';
-
-/**
- * Overlay actions with dedicated in-Header handling below (see withUiSuspend) instead
- * of the generic chrome-nav passthrough.
- */
-const OVERLAY_UI_ACTIONS = new Set([
-  'settings',
-  'search',
-  'auth',
-  'export-excel',
-  'export-pdf',
-]);
-
-/**
- * Under SysListView32/WS_POPUP embed the real click already reaches this surface's own
- * DOM directly (see DesktopEmbedService.IsPopupStyleEmbed) — same precondition the
- * day-cell double-click already relies on for the quick-edit popover — so these open in
- * place instead of unlocking/undocking to the App window. Settings was the first one
- * converted; search/auth/export used to defer entirely to the native zone-poll calling
- * SuspendForUi (or, for export, stay disabled outright while embedded), which unlocked
- * App in parallel with this real click. Export's download itself is a plain browser
- * blob/anchor download (see downloadExport.js) — nothing about it needs the App window
- * specifically, so it opens/runs in place exactly like the others.
- */
-const IN_PLACE_UI_ACTIONS = new Set(['settings', 'search', 'auth', 'export-excel', 'export-pdf']);
 
 const VIEW_MODE_OPTIONS = [
   { value: 'year', label: '연' },
@@ -239,6 +214,35 @@ function HideCompletedCheckIcon({ checked }) {
   );
 }
 
+/** Shared page-with-folded-corner outline that Excel/PDF icons label. */
+function DocumentOutlineIcon({ children }) {
+  return (
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+      <path
+        fill="currentColor"
+        d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"
+      />
+      {children}
+    </svg>
+  );
+}
+
+function ExcelIcon() {
+  return (
+    <DocumentOutlineIcon>
+      <text x="12.5" y="17.2" textAnchor="middle" fontSize="7.5" fontWeight="700" fill="currentColor">X</text>
+    </DocumentOutlineIcon>
+  );
+}
+
+function PdfIcon() {
+  return (
+    <DocumentOutlineIcon>
+      <text x="12.5" y="16.8" textAnchor="middle" fontSize="5.5" fontWeight="700" fill="currentColor">PDF</text>
+    </DocumentOutlineIcon>
+  );
+}
+
 const actionBtnBase =
   'inline-flex h-9 shrink-0 items-center justify-center rounded border border-gcal-border px-2 text-xs font-semibold text-gcal-heading disabled:cursor-not-allowed disabled:opacity-40 sm:min-w-[72px] sm:px-3 sm:text-sm';
 
@@ -306,12 +310,10 @@ export default function Header({
   const [desktopEmbedded, setDesktopEmbedded] = useState(false);
   const [desktopEditMode, setDesktopEditMode] = useState(false);
   const [actuallyEmbedded, setActuallyEmbedded] = useState(false);
+  /** Top-level WS_POPUP desktop — native clicks reach React; do not suppress onClick. */
+  const [popupStyleEmbed, setPopupStyleEmbed] = useState(false);
   const [desktopReady, setDesktopReady] = useState(true);
   const [desktopChecks, setDesktopChecks] = useState([]);
-  // SysListView32/WS_POPUP embed — real clicks reach this surface's DOM directly (see
-  // DesktopEmbedService.IsPopupStyleEmbed), the same precondition day-cell double-click
-  // already relies on to open the quick-edit popover in place.
-  const [popupStyleEmbed, setPopupStyleEmbed] = useState(false);
   const [applyingDesktop, setApplyingDesktop] = useState(false);
   const windowModeBtnRef = useRef(null);
   const headerRef = useRef(null);
@@ -373,55 +375,38 @@ export default function Header({
   }, [onResumeDesktop]);
 
   const selectViewMode = useCallback((mode) => {
+    // Single-HWND now — no second surface left to mirror to (see withUiSuspend).
     onViewModeChange?.(mode);
-    // Sync the other WebView surface (App ↔ DesktopHost) — native shell only.
-    if (isNeutralinoDesktopShell() && window.myCalendar?.suspendDesktopEmbedForUi) {
-      void window.myCalendar.suspendDesktopEmbedForUi(`view-${mode}`);
-    }
   }, [onViewModeChange]);
 
   /** @param {string} action @param {(() => void) | undefined} fn @param {{ resume?: boolean }} [options] */
   const withUiSuspend = useCallback((action, fn, options = {}) => () => {
-    // Wallpaper Host: Settings/Search/Login/export all open/run in place (see IN_PLACE_UI_ACTIONS).
-    if (isDesktopSurfaceHost() && OVERLAY_UI_ACTIONS.has(action)) {
-      // See IN_PLACE_UI_ACTIONS: real click already reached this surface's own DOM —
-      // open in place (same overlay-over-still-embedded pattern as the quick-edit
-      // popover) instead of unlocking/undocking to the App window. That native
-      // SetParent+Show swap was the source of the main window briefly shrinking and the
-      // panel sometimes not opening at all.
-      if (IN_PLACE_UI_ACTIONS.has(action) && popupStyleEmbed && actuallyEmbedded && !desktopEditMode) {
-        fn?.();
-        return;
-      }
-      // While embedded, native hit-zones already call SuspendForUi — Host onClick
-      // must not call it again (double SuspendDesktopForUi flashes the desktop).
-      if (actuallyEmbedded && !desktopEditMode) {
-        return;
-      }
-      if (window.myCalendar?.suspendDesktopEmbedForUi) {
-        void window.myCalendar.suspendDesktopEmbedForUi(action);
-      }
+    // Eye / completed toggles are not hit-zones — always apply locally.
+    if (STORE_SYNCED_UI_ACTIONS.has(action)) {
+      fn?.();
+      return;
+    }
+
+    // Legacy shell-child embed: DefView steals clicks; zones deliver UI actions.
+    // Top-level WS_POPUP (popupStyleEmbed): native clicks reach React — run handlers.
+    if (actuallyEmbedded && !desktopEditMode && !popupStyleEmbed) {
       return;
     }
 
     const shouldResume = Boolean(options.resume && needsUiSuspend);
-    // Store-synced toggles reach the other surface via the settings store broadcast
-    // already (see STORE_SYNCED_UI_ACTIONS) — no native mirror needed or wanted here.
-    if (!STORE_SYNCED_UI_ACTIONS.has(action)) {
-      // Always notify native for period-row chrome so DesktopHost stays in sync in window mode
-      // (and so zone clicks while embedded reach the host WebView).
-      // Chrome nav sync / unlock only inside the native shell WebView — never from browser web UI.
-      if (isNeutralinoDesktopShell() && CHROME_NAV_ACTIONS.has(action) && window.myCalendar?.suspendDesktopEmbedForUi) {
-        void window.myCalendar.suspendDesktopEmbedForUi(action);
-      } else if (isNeutralinoDesktopShell()) {
-        suspendForUi(action);
-      }
+    // Single-HWND now: fn() below always runs directly on this surface. Chrome-nav
+    // actions used to also mirror through suspendDesktopEmbedForUi() so the *other*
+    // (now-removed) surface's App view could hear "prev/next fired" and catch up — with
+    // only one surface left, that round-trip just echoes pendingUiAction back to this
+    // same WebView (via widget-status → mycalendar:pendingUiAction), re-running the same
+    // navigation a second time and advancing the month/week by two per click.
+    if (!CHROME_NAV_ACTIONS.has(action) && isNeutralinoDesktopShell()) {
+      suspendForUi(action);
     }
     try {
       fn?.();
     } finally {
       if (shouldResume) {
-        // Re-embed only when we temporarily unlocked from desktop mode.
         window.setTimeout(() => resumeDesktop(), 0);
       }
     }
@@ -432,13 +417,10 @@ export default function Header({
       return;
     }
 
-    try {
-      const surface = new URLSearchParams(window.location.search).get('surface');
-      if (surface !== 'desktop' && actuallyEmbedded && !desktopEditMode) {
-        return;
-      }
-    } catch {
-      /* ignore */
+    // WS_POPUP desktop: window-mode button uses native React onClick — no hit-zone.
+    if (!actuallyEmbedded || desktopEditMode || popupStyleEmbed) {
+      void window.myCalendar.clearUndockZone?.();
+      return;
     }
 
     const el = windowModeBtnRef.current;
@@ -462,26 +444,16 @@ export default function Header({
         height: Math.round(rect.height),
       },
     });
-  }, [actuallyEmbedded, desktopEditMode]);
+  }, [actuallyEmbedded, desktopEditMode, popupStyleEmbed]);
 
   const reportUiActionZones = useCallback(() => {
     if (!window.myCalendar?.setUiActionZones) {
       return;
     }
 
-    // App WebView must not overwrite DesktopHost hit-zones while wallpaper surface is active.
-    try {
-      const surface = new URLSearchParams(window.location.search).get('surface');
-      if (surface !== 'desktop' && actuallyEmbedded && !desktopEditMode) {
-        return;
-      }
-    } catch {
-      /* ignore */
-    }
-
-    // Header UI zones are only needed while truly embedded (DefView steals clicks).
-    // In window mode React onClick handles buttons — reporting zones would double-fire.
-    if (suppressPointerZones || !actuallyEmbedded) {
+    // Zones only for legacy shell-child embeds (DefView steals clicks).
+    // WS_POPUP / window mode: React onClick handles buttons — zones would double-fire.
+    if (suppressPointerZones || !actuallyEmbedded || popupStyleEmbed) {
       void window.myCalendar.setUiActionZones(null);
       return;
     }
@@ -518,7 +490,7 @@ export default function Header({
     void window.myCalendar.setUiActionZones(
       clientRects.length ? { clientRects } : null,
     );
-  }, [actuallyEmbedded, desktopEditMode, suppressPointerZones]);
+  }, [actuallyEmbedded, desktopEditMode, suppressPointerZones, popupStyleEmbed]);
 
   const refreshWidgetStatus = useCallback(async () => {
     if (!isNeutralinoDesktopShell() || !window.myCalendar?.getWidgetStatus) {
@@ -526,9 +498,9 @@ export default function Header({
       setDesktopEmbedded(false);
       setDesktopEditMode(false);
       setActuallyEmbedded(false);
+      setPopupStyleEmbed(false);
       setDesktopReady(true);
       setDesktopChecks([]);
-      setPopupStyleEmbed(false);
       return;
     }
     try {
@@ -536,21 +508,21 @@ export default function Header({
       const suspended = Boolean(status.embedSuspended || status.resumeDesktopPending);
       setDesktopWidgetAvailable(Boolean(status.available));
       setActuallyEmbedded(Boolean(status.embedded));
+      setPopupStyleEmbed(Boolean(status.popupStyleEmbed));
       // Treat temporary unlock (quick-edit/auth/export) as still desktop so closing
       // UI can resume embed, and the mode toggle stays correct while suspended.
       setDesktopEmbedded(Boolean(status.embedded) || suspended);
       setDesktopEditMode(Boolean(status.editMode) && !suspended);
       setDesktopReady(status.ready !== false);
       setDesktopChecks(Array.isArray(status.checks) ? status.checks : []);
-      setPopupStyleEmbed(Boolean(status.popupStyleEmbed));
     } catch {
       setDesktopWidgetAvailable(false);
       setDesktopEmbedded(false);
       setDesktopEditMode(false);
       setActuallyEmbedded(false);
+      setPopupStyleEmbed(false);
       setDesktopReady(true);
       setDesktopChecks([]);
-      setPopupStyleEmbed(false);
     }
   }, []);
 
@@ -685,7 +657,6 @@ export default function Header({
 
     setApplyingDesktop(true);
     try {
-      // Push current month before showing DesktopHost (Host scroll may still be at week 0).
       publishViewNav();
       const result = await window.myCalendar.applyWidgetToDesktop();
       await refreshWidgetStatus();
@@ -856,32 +827,6 @@ export default function Header({
           >
             {isLoggedIn ? '로그아웃' : '로그인'}
           </button>
-          <button
-            type="button"
-            data-ui-action="export-excel"
-            className={cn(
-              actionBtnBase,
-              'bg-gcal-blue-soft hover:bg-[#d2e3fc] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-gcal-blue-soft',
-            )}
-            disabled={exporting}
-            title="Excel로 내보내기"
-            onClick={withUiSuspend('export-excel', onExportExcel)}
-          >
-            EXCEL
-          </button>
-          <button
-            type="button"
-            data-ui-action="export-pdf"
-            className={cn(
-              actionBtnBase,
-              'bg-gcal-blue-soft hover:bg-[#d2e3fc] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-gcal-blue-soft',
-            )}
-            disabled={exporting}
-            title="PDF로 내보내기"
-            onClick={withUiSuspend('export-pdf', onExportPdf)}
-          >
-            PDF
-          </button>
         </div>
       </div>
 
@@ -1039,6 +984,28 @@ export default function Header({
             }}
           >
             <HideCompletedCheckIcon checked={completedHidden} />
+          </button>
+          <button
+            type="button"
+            data-ui-action="export-excel"
+            className={cn(desktopModeIconBtnClass, softBlueIconBtnClass)}
+            aria-label="Excel로 내보내기"
+            title="Excel로 내보내기"
+            disabled={exporting}
+            onClick={withUiSuspend('export-excel', onExportExcel)}
+          >
+            <ExcelIcon />
+          </button>
+          <button
+            type="button"
+            data-ui-action="export-pdf"
+            className={cn(desktopModeIconBtnClass, softBlueIconBtnClass)}
+            aria-label="PDF로 내보내기"
+            title="PDF로 내보내기"
+            disabled={exporting}
+            onClick={withUiSuspend('export-pdf', onExportPdf)}
+          >
+            <PdfIcon />
           </button>
         </div>
       </div>

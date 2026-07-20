@@ -20,6 +20,26 @@ internal sealed class CalendarStoreService
     private const int CalendarFileVersion = 1;
     private const string LegacyStoreFilename = "calendar-store.json";
 
+    /// <summary>WebView2 desktop shell client surface.</summary>
+    public const string SurfaceNative = "native";
+
+    /// <summary>LAN / browser HTTP client surface.</summary>
+    public const string SurfaceBrowser = "browser";
+
+    /// <summary>
+    /// Presentation prefs that must not sync between the desktop app and the web page.
+    /// Stored under <c>settings.viewOptionsBySurface.{native|browser}</c>.
+    /// </summary>
+    private static readonly HashSet<string> SurfaceScopedViewOptionKeys = new(StringComparer.Ordinal)
+    {
+        "eventsHidden",
+        "completedHidden",
+        "showWeekNumbers",
+        "weekStartsOnSunday",
+        "colorScheme",
+        "accentColor",
+    };
+
     private static readonly JsonSerializerOptions WriteOptions = JsonUtil.Indented;
 
     private static readonly HashSet<string> BuiltinCalendarIds =
@@ -233,7 +253,8 @@ internal sealed class CalendarStoreService
             return;
         }
 
-        SetCalendarHiddenForLogin(admin, calId, hidden: true);
+        // Hide on both surfaces so neither UI suddenly shows a new foreign calendar.
+        SetCalendarHiddenForLogin(admin, calId, hidden: true, surface: null);
     }
 
     /// <summary>
@@ -333,8 +354,9 @@ internal sealed class CalendarStoreService
 
     /// <summary>
     /// Personal eye-toggle: hide/show a calendar for one login without changing the shared calendar record.
+    /// When <paramref name="surface"/> is null, both native and browser lists are updated.
     /// </summary>
-    public void SetCalendarHiddenForLogin(string loginId, string calendarId, bool hidden)
+    public void SetCalendarHiddenForLogin(string loginId, string calendarId, bool hidden, string? surface = SurfaceNative)
     {
         var owner = (loginId ?? "").Trim();
         var calId = (calendarId ?? "").Trim();
@@ -344,36 +366,44 @@ internal sealed class CalendarStoreService
         var settings = GetObject(store, "settings") ?? CreateDefaultSettings();
         var byLogin = GetObject(settings, "hiddenCalendarIdsByLoginId") ?? new JsonObject();
         var key = FindDayColorsLoginKey(byLogin, owner) ?? owner;
-        var list = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (byLogin[key] is JsonArray existing)
+        EnsureHiddenCalendarEntryIsPerSurface(byLogin, key);
+
+        var surfaces = surface is null
+            ? new[] { SurfaceNative, SurfaceBrowser }
+            : new[] { NormalizeClientSurface(surface) };
+
+        foreach (var surf in surfaces)
         {
-            foreach (var node in existing)
+            var list = ReadHiddenIdSetFromSurfaceBucket(byLogin[key] as JsonObject, surf);
+            if (hidden) list.Add(calId);
+            else list.Remove(calId);
+
+            var next = new JsonArray();
+            foreach (var id in list.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
             {
-                var id = node?.GetValue<string>()?.Trim() ?? "";
-                if (id.Length > 0) list.Add(id);
+                next.Add(id);
             }
+
+            if (byLogin[key] is not JsonObject bucket)
+            {
+                bucket = new JsonObject();
+                byLogin[key] = bucket;
+            }
+
+            bucket[surf] = next;
         }
 
-        if (hidden) list.Add(calId);
-        else list.Remove(calId);
-
-        var next = new JsonArray();
-        foreach (var id in list.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
-        {
-            next.Add(id);
-        }
-
-        byLogin[key] = next;
         settings["hiddenCalendarIdsByLoginId"] = byLogin;
         store["settings"] = settings;
         WriteStore(store);
     }
 
     /// <summary>Overlay per-member eye-toggle onto <c>calendar.visible</c> for API clients.</summary>
-    public static void ProjectCalendarVisibilityForClient(JsonObject store, string? loginId)
+    public static void ProjectCalendarVisibilityForClient(JsonObject store, string? loginId, string clientSurface = SurfaceNative)
     {
         if (store["calendars"] is not JsonArray calendars) return;
-        var hidden = GetHiddenCalendarIdSet(store["settings"] as JsonObject, loginId);
+        var surface = NormalizeClientSurface(clientSurface);
+        var hidden = GetHiddenCalendarIdSet(store["settings"] as JsonObject, loginId, surface);
         foreach (var node in calendars)
         {
             if (node is not JsonObject cal) continue;
@@ -387,7 +417,7 @@ internal sealed class CalendarStoreService
         }
     }
 
-    private static HashSet<string> GetHiddenCalendarIdSet(JsonObject? settings, string? loginId)
+    private static HashSet<string> GetHiddenCalendarIdSet(JsonObject? settings, string? loginId, string clientSurface)
     {
         var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var owner = (loginId ?? "").Trim();
@@ -396,7 +426,28 @@ internal sealed class CalendarStoreService
         var byLogin = settings["hiddenCalendarIdsByLoginId"] as JsonObject;
         if (byLogin is null) return result;
         var key = FindDayColorsLoginKey(byLogin, owner);
-        if (key is null || byLogin[key] is not JsonArray arr) return result;
+        if (key is null) return result;
+
+        // Legacy: flat string[] shared by both surfaces.
+        if (byLogin[key] is JsonArray arr)
+        {
+            foreach (var node in arr)
+            {
+                var id = node?.GetValue<string>()?.Trim() ?? "";
+                if (id.Length > 0) result.Add(id);
+            }
+
+            return result;
+        }
+
+        return ReadHiddenIdSetFromSurfaceBucket(byLogin[key] as JsonObject, clientSurface);
+    }
+
+    private static HashSet<string> ReadHiddenIdSetFromSurfaceBucket(JsonObject? bucket, string surface)
+    {
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (bucket is null) return result;
+        if (bucket[NormalizeClientSurface(surface)] is not JsonArray arr) return result;
         foreach (var node in arr)
         {
             var id = node?.GetValue<string>()?.Trim() ?? "";
@@ -404,6 +455,31 @@ internal sealed class CalendarStoreService
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Convert legacy <c>loginId → string[]</c> into <c>loginId → { native, browser }</c>
+    /// by cloning the array onto both surfaces.
+    /// </summary>
+    private static void EnsureHiddenCalendarEntryIsPerSurface(JsonObject byLogin, string key)
+    {
+        if (byLogin[key] is JsonObject) return;
+
+        var seeded = new JsonArray();
+        if (byLogin[key] is JsonArray legacy)
+        {
+            foreach (var node in legacy)
+            {
+                var id = node?.GetValue<string>()?.Trim() ?? "";
+                if (id.Length > 0) seeded.Add(id);
+            }
+        }
+
+        byLogin[key] = new JsonObject
+        {
+            [SurfaceNative] = seeded.DeepClone(),
+            [SurfaceBrowser] = seeded.DeepClone(),
+        };
     }
 
     /// <summary>
@@ -1261,11 +1337,19 @@ internal sealed class CalendarStoreService
     /// When the client patches <c>dayColors</c>, store under this login in
     /// <c>dayColorsByLoginId</c> (per-member). Returned settings expose only that member's map as <c>dayColors</c>.
     /// </param>
-    public JsonObject PatchSettings(JsonObject payload, string? dayColorsOwnerLoginId = null)
+    /// <param name="clientSurface">
+    /// <see cref="SurfaceNative"/> or <see cref="SurfaceBrowser"/> — presentation
+    /// viewOptions (hide toggles, theme, week layout) are stored per surface.
+    /// </param>
+    public JsonObject PatchSettings(
+        JsonObject payload,
+        string? dayColorsOwnerLoginId = null,
+        string clientSurface = SurfaceNative)
     {
         var store = ReadStore();
         var current = GetObject(store, "settings") ?? CreateDefaultSettings();
         var defaults = CreateDefaultSettings();
+        var surface = NormalizeClientSurface(clientSurface);
 
         var safePayload = (JsonObject)payload.DeepClone();
         JsonObject? dayColorsPatch = null;
@@ -1275,25 +1359,29 @@ internal sealed class CalendarStoreService
             safePayload.Remove("dayColors");
         }
 
-        // Per-member maps are server-owned; never shallow-merge from clients.
+        // Per-member / per-surface maps are server-owned; never shallow-merge from clients.
         safePayload.Remove("dayColorsByLoginId");
         safePayload.Remove("hiddenCalendarIdsByLoginId");
+        safePayload.Remove("viewOptionsBySurface");
+
+        var viewOptionsPatch = GetObject(safePayload, "viewOptions")?.DeepClone() as JsonObject;
+        safePayload.Remove("viewOptions");
 
         var notifications = MergeObjects(MergeObjects(GetObject(defaults, "notifications"), GetObject(current, "notifications")), GetObject(safePayload, "notifications"));
         if (GetString(notifications, "enabled") == "email") notifications["enabled"] = "none";
 
         var holidaysKr = NormalizeHolidaysKr(MergeObjects(MergeObjects(GetObject(defaults, "holidaysKr"), GetObject(current, "holidaysKr")), GetObject(safePayload, "holidaysKr")));
 
-        var viewOptions = MergeObjects(MergeObjects(GetObject(defaults, "viewOptions"), GetObject(current, "viewOptions")), GetObject(safePayload, "viewOptions"));
-
         var widgetInput = MergeObjects(GetObject(current, "widget"), GetObject(safePayload, "widget"));
         var widget = NormalizeWidget(GetObject(defaults, "widget"), widgetInput);
 
         var newSettings = MergeObjects(current, safePayload);
         newSettings["notifications"] = notifications;
-        newSettings["viewOptions"] = viewOptions;
         newSettings["widget"] = widget;
         newSettings["holidaysKr"] = holidaysKr;
+
+        EnsureViewOptionsBySurfaceMigrated(newSettings);
+        ApplyViewOptionsPatch(newSettings, viewOptionsPatch, surface, defaults);
 
         var ownerKey = (dayColorsOwnerLoginId ?? "").Trim();
         var migrateOwner = ownerKey.Length > 0 ? ownerKey : AppConstants.DefaultAdminId;
@@ -1323,7 +1411,114 @@ internal sealed class CalendarStoreService
         store["settings"] = newSettings;
         var written = WriteStore(store);
         var saved = CloneDetached(GetObject(written, "settings") ?? newSettings);
-        return ProjectSettingsDayColorsForClient(saved, ownerKey.Length > 0 ? ownerKey : null);
+        ProjectSettingsDayColorsForClient(saved, ownerKey.Length > 0 ? ownerKey : null);
+        ProjectViewOptionsForClient(saved, surface);
+        return saved;
+    }
+
+    /// <summary>
+    /// Flatten surface-scoped + shell viewOptions into <c>settings.viewOptions</c> for API clients
+    /// and remove the internal <c>viewOptionsBySurface</c> map.
+    /// </summary>
+    public static void ProjectViewOptionsForClient(JsonObject settings, string clientSurface)
+    {
+        EnsureViewOptionsBySurfaceMigrated(settings);
+        var surface = NormalizeClientSurface(clientSurface);
+        var defaults = CreateDefaultSettings();
+        var shell = ExtractShellViewOptions(GetObject(settings, "viewOptions"));
+        var bySurface = GetObject(settings, "viewOptionsBySurface") ?? new JsonObject();
+        var surfaceVo = GetObject(bySurface, surface) ?? new JsonObject();
+        settings["viewOptions"] = MergeObjects(
+            MergeObjects(GetObject(defaults, "viewOptions"), shell),
+            surfaceVo);
+        settings.Remove("viewOptionsBySurface");
+    }
+
+    public static string NormalizeClientSurface(string? surface)
+        => string.Equals(surface, SurfaceBrowser, StringComparison.OrdinalIgnoreCase)
+            ? SurfaceBrowser
+            : SurfaceNative;
+
+    private static void ApplyViewOptionsPatch(
+        JsonObject settings,
+        JsonObject? viewOptionsPatch,
+        string surface,
+        JsonObject defaults)
+    {
+        var shellCurrent = ExtractShellViewOptions(GetObject(settings, "viewOptions"));
+        if (viewOptionsPatch is not null)
+        {
+            var surfacePatch = new JsonObject();
+            var shellPatch = new JsonObject();
+            foreach (var prop in viewOptionsPatch)
+            {
+                if (SurfaceScopedViewOptionKeys.Contains(prop.Key))
+                {
+                    surfacePatch[prop.Key] = prop.Value?.DeepClone();
+                }
+                else if (prop.Key == "runAtStartup" && surface == SurfaceNative)
+                {
+                    // Shell-only preference — ignore when patched from the browser.
+                    shellPatch[prop.Key] = prop.Value?.DeepClone();
+                }
+            }
+
+            var bySurface = GetObject(settings, "viewOptionsBySurface") ?? new JsonObject();
+            var currentSurface = GetObject(bySurface, surface) ?? new JsonObject();
+            bySurface[surface] = MergeObjects(currentSurface, surfacePatch);
+            settings["viewOptionsBySurface"] = bySurface;
+            shellCurrent = MergeObjects(shellCurrent, shellPatch);
+        }
+
+        // On disk: flat viewOptions keeps shell keys only (plus defaults for compat readers).
+        settings["viewOptions"] = MergeObjects(
+            ExtractShellViewOptions(GetObject(defaults, "viewOptions")),
+            shellCurrent);
+    }
+
+    private static void EnsureViewOptionsBySurfaceMigrated(JsonObject settings)
+    {
+        var defaultsVo = GetObject(CreateDefaultSettings(), "viewOptions") ?? new JsonObject();
+        var flat = GetObject(settings, "viewOptions") ?? new JsonObject();
+        var bySurface = GetObject(settings, "viewOptionsBySurface") ?? new JsonObject();
+
+        foreach (var surface in new[] { SurfaceNative, SurfaceBrowser })
+        {
+            if (bySurface[surface] is JsonObject) continue;
+            // Seed both surfaces from the legacy flat map so existing prefs are preserved,
+            // then they diverge independently.
+            bySurface[surface] = ExtractSurfaceViewOptions(MergeObjects(defaultsVo, flat));
+        }
+
+        settings["viewOptionsBySurface"] = bySurface;
+        settings["viewOptions"] = ExtractShellViewOptions(MergeObjects(defaultsVo, flat));
+    }
+
+    private static JsonObject ExtractSurfaceViewOptions(JsonObject? viewOptions)
+    {
+        var result = new JsonObject();
+        if (viewOptions is null) return result;
+        foreach (var key in SurfaceScopedViewOptionKeys)
+        {
+            if (viewOptions[key] is JsonNode node)
+            {
+                result[key] = node.DeepClone();
+            }
+        }
+
+        return result;
+    }
+
+    private static JsonObject ExtractShellViewOptions(JsonObject? viewOptions)
+    {
+        var result = new JsonObject();
+        if (viewOptions is null) return result;
+        if (viewOptions["runAtStartup"] is JsonNode node)
+        {
+            result["runAtStartup"] = node.DeepClone();
+        }
+
+        return result;
     }
 
     /// <summary>
@@ -1975,6 +2170,8 @@ internal sealed class CalendarStoreService
         var result = MergeObjects(defaults, settings);
         result["notifications"] = notifications;
         result["viewOptions"] = MergeObjects(GetObject(defaults, "viewOptions"), GetObject(settings, "viewOptions"));
+        result["viewOptionsBySurface"] = GetObject(settings, "viewOptionsBySurface")?.DeepClone() as JsonObject
+            ?? new JsonObject();
         result["holidaysKr"] = holidaysKr;
         result["widget"] = NormalizeWidget(GetObject(defaults, "widget"), GetObject(settings, "widget"));
         // Must DeepClone — nested maps are still parented under `settings`.
@@ -1984,6 +2181,7 @@ internal sealed class CalendarStoreService
         result["hiddenCalendarIdsByLoginId"] = GetObject(settings, "hiddenCalendarIdsByLoginId")?.DeepClone() as JsonObject
             ?? new JsonObject();
         EnsureDayColorsMigrated(result, AppConstants.DefaultAdminId);
+        EnsureViewOptionsBySurfaceMigrated(result);
         result["allowedIpCidrs"] = IpAccessGuard.NormalizeAllowedIpCidrs(settings["allowedIpCidrs"]);
         return result;
     }
@@ -2276,6 +2474,27 @@ internal sealed class CalendarStoreService
             ["dayColors"] = new JsonObject(),
             ["dayColorsByLoginId"] = new JsonObject(),
             ["hiddenCalendarIdsByLoginId"] = new JsonObject(),
+            ["viewOptionsBySurface"] = new JsonObject
+            {
+                [SurfaceNative] = new JsonObject
+                {
+                    ["showWeekNumbers"] = true,
+                    ["weekStartsOnSunday"] = true,
+                    ["colorScheme"] = "light",
+                    ["accentColor"] = "#1976d2",
+                    ["eventsHidden"] = false,
+                    ["completedHidden"] = false,
+                },
+                [SurfaceBrowser] = new JsonObject
+                {
+                    ["showWeekNumbers"] = true,
+                    ["weekStartsOnSunday"] = true,
+                    ["colorScheme"] = "light",
+                    ["accentColor"] = "#1976d2",
+                    ["eventsHidden"] = false,
+                    ["completedHidden"] = false,
+                },
+            },
             ["allowedIpCidrs"] = new JsonArray(),
         };
     }

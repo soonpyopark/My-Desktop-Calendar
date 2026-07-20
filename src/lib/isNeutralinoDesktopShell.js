@@ -1,13 +1,14 @@
 import { isNativeHost } from './nativeHost.js';
 
 /**
- * True when running as the wallpaper DesktopHost surface (dual-HWND).
- * Settings/search open on App after permanent window unlock; auth/export/editors may temp-unlock.
+ * True when the calendar is in wallpaper desktop mode (shell-parented).
+ * Backed by the latest native widgetStatus.embedded (see desktop-bridge.js).
+ * Name kept for call-site compatibility; formerly meant the dual-HWND Host surface.
  */
 export function isDesktopSurfaceHost() {
   try {
     if (typeof window === 'undefined') return false;
-    return new URLSearchParams(window.location.search).get('surface') === 'desktop';
+    return Boolean(window.__myCalDesktopEmbedded);
   } catch {
     return false;
   }

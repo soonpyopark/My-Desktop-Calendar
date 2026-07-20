@@ -33,6 +33,7 @@ import {
   parseSecuritySettingsPayload,
   securitySettingsExportFilename,
 } from '../../shared/securitySettingsIo.js';
+import { isNativeHost } from '../lib/nativeHost.js';
 
 const fieldBoxClass =
   'rounded-lg border border-gcal-border bg-gcal-input px-4 py-3 focus-within:border-gcal-blue focus-within:ring-2 focus-within:ring-gcal-blue/15';
@@ -135,6 +136,7 @@ function percentToOpacity(percent) {
 }
 
 function ViewOptionsPanel({ settings, onSaveSettings }) {
+  const shellControls = isNativeHost();
   const initial = { ...DEFAULT_VIEW_OPTIONS, ...settings?.viewOptions };
   const [showWeekNumbers, setShowWeekNumbers] = useState(initial.showWeekNumbers);
   const [weekStartsOnSunday, setWeekStartsOnSunday] = useState(initial.weekStartsOnSunday !== false);
@@ -279,36 +281,42 @@ function ViewOptionsPanel({ settings, onSaveSettings }) {
         <CalendarColorPalette value={accentColor} onChange={(color) => void handleAccentColorChange(color)} />
       </fieldset>
 
-      <div className="mt-8">
-        <h3 className="mb-3 text-[22px] font-normal text-gcal-heading">투명도</h3>
-        <p className="mb-4 text-sm text-gcal-muted">메인 창의 투명도를 5% 단위로 조절합니다.</p>
-        <div className="flex items-center gap-3">
-          <input
-            type="range"
-            min={5}
-            max={100}
-            step={5}
-            value={opacityPercent}
-            onChange={(e) => void handleOpacityChange(e.target.value)}
-            className="h-2 w-full max-w-xs cursor-pointer accent-gcal-blue"
-            aria-label="투명도"
-          />
-          <span className="w-12 shrink-0 text-sm tabular-nums text-gcal-body">{opacityPercent}%</span>
+      {shellControls && (
+        <div className="mt-8">
+          <h3 className="mb-3 text-[22px] font-normal text-gcal-heading">투명도</h3>
+          <p className="mb-4 text-sm text-gcal-muted">
+            바탕화면(벽지·아이콘)이 비치는 정도를 5% 단위로 조절합니다.
+          </p>
+          <div className="flex items-center gap-3">
+            <input
+              type="range"
+              min={5}
+              max={100}
+              step={5}
+              value={opacityPercent}
+              onChange={(e) => void handleOpacityChange(e.target.value)}
+              className="h-2 w-full max-w-xs cursor-pointer accent-gcal-blue"
+              aria-label="투명도"
+            />
+            <span className="w-12 shrink-0 text-sm tabular-nums text-gcal-body">{opacityPercent}%</span>
+          </div>
         </div>
-      </div>
+      )}
 
-      <div className="mt-8">
-        <h3 className="mb-8 text-[22px] font-normal text-gcal-heading">프로그램 시작시 실행 모드</h3>
-        <label className="flex items-center gap-2.5 text-sm text-gcal-body">
-          <input
-            type="checkbox"
-            checked={runAtStartup}
-            disabled={saving}
-            onChange={(e) => void handleRunAtStartupChange(e.target.checked)}
-          />
-          컴퓨터 시작시 자동 실행
-        </label>
-      </div>
+      {shellControls && (
+        <div className="mt-8">
+          <h3 className="mb-8 text-[22px] font-normal text-gcal-heading">프로그램 시작시 실행 모드</h3>
+          <label className="flex items-center gap-2.5 text-sm text-gcal-body">
+            <input
+              type="checkbox"
+              checked={runAtStartup}
+              disabled={saving}
+              onChange={(e) => void handleRunAtStartupChange(e.target.checked)}
+            />
+            컴퓨터 시작시 자동 실행
+          </label>
+        </div>
+      )}
 
       {saved && <p className="mt-4 text-sm text-gcal-green">저장되었습니다.</p>}
     </div>

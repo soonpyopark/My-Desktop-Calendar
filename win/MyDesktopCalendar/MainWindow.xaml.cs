@@ -71,19 +71,11 @@ public partial class MainWindow : Window
         _surfaces = new DesktopSurfaceController(this, _embed, () => _bridge);
         _undockZones = new UndockZoneMonitor(
             _embed,
-            () =>
-            {
-                // Zone hit-testing targets the visible desktop host when active.
-                var host = _surfaces.HostHwnd;
-                return host != IntPtr.Zero && _embed.IsEmbedded ? host : _hwnd;
-            },
+            () => _hwnd,
             ShowFromTray,
             dateKey => _bridge.SuspendForCreate(dateKey),
             (eventId, dayKey) => _bridge.SuspendForEdit(eventId, dayKey),
-            // Zone hit-testing always targets the visible DesktopHost surface (see getHwnd
-            // above) — tag it "desktop" so NotifyWidgetStatus's popup-style echo skip lines
-            // up the same way it does for the browser-side suspendDesktopEmbedForUi call.
-            action => _bridge.SuspendForUi(action, "desktop"));
+            action => _bridge.SuspendForUi(action));
         _bridge = new NativeBridge(_store, _auth, _embed, _undockZones, this);
         _bridge.BindSurfaces(_surfaces);
         StartWebServerOnLaunch();
@@ -117,10 +109,9 @@ public partial class MainWindow : Window
         SizeChanged += OnWindowSizeChanged;
 
         // Monitor sleep/wake, cable reconnect, resolution/DPI, or arrangement changes commonly
-        // make Explorer recreate Progman/WorkerW/DefView — the desktop-embedded DesktopHost
-        // (a Progman/WorkerW child) has no way to hear about that on its own, so without this
-        // it can end up parented to a now-dead handle or parked over screen space that no
-        // longer exists (repeated disappear/reappear + eventually unresponsive clicks).
+        // make Explorer recreate Progman/WorkerW/DefView — a shell-parented MainWindow
+        // has no way to hear about that on its own, so without this it can end up parented
+        // to a now-dead handle or parked over screen space that no longer exists.
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
     }
 
@@ -406,155 +397,15 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Force App WebView visible + Normal memory and a compositor invalidation.
+    /// Force WebView visible + Normal memory and a compositor invalidation.
     /// Safe to call anytime; used after size-move and as a recovery path.
     /// </summary>
-    private void EnsureWebViewRematerialized()
-    {
-        if (_appWebViewParked)
-        {
-            _ = EnsureAppWebViewReadyAsync();
-            return;
-        }
-
-        SetAppWebViewActive(true);
-    }
+    private void EnsureWebViewRematerialized() => SetAppWebViewActive(true);
 
     /// <summary>
-    /// Idle-surface policy for the App WebView (see <see cref="WebViewSurfaceMemory"/>).
-    /// Called from <see cref="DesktopSurfaceController"/> when cloaking / revealing App.
+    /// Memory throttle for the single WebView (see <see cref="WebViewSurfaceMemory"/>).
     /// </summary>
-    internal void SetAppWebViewActive(bool active)
-    {
-        if (_appWebViewParked)
-        {
-            return;
-        }
-
-        WebViewSurfaceMemory.SetActive(WebView, active);
-    }
-
-    private bool _appWebViewParked;
-    private int _appWebViewGeneration;
-    private Task? _ensureAppWebViewTask;
-
-    /// <summary>
-    /// Dispose the App WebView2 while desktop mode is active so only DesktopHost's
-    /// Chromium tree remains. Recreated by <see cref="EnsureAppWebViewReadyAsync"/>.
-    /// </summary>
-    internal void ParkAppWebViewForDesktop()
-    {
-        if (_appWebViewParked)
-        {
-            return;
-        }
-
-        // Mark parked before Dispose so in-flight probes / Activated handlers skip the
-        // dying control (accessing CoreWebView2 after Dispose throws unhandled).
-        _appWebViewParked = true;
-        _appWebViewGeneration++;
-
-        try
-        {
-            _bridge.DetachPrimary();
-        }
-        catch
-        {
-            /* ignore */
-        }
-
-        try
-        {
-            if (WebView2Safe.TryGetCore(WebView) is { } core)
-            {
-                core.NavigationCompleted -= OnWebViewNavigationCompleted;
-            }
-        }
-        catch
-        {
-            /* ignore */
-        }
-
-        var grid = Content as Grid;
-        if (grid is null)
-        {
-            WebViewSurfaceMemory.SetActive(WebView, false);
-            return;
-        }
-
-        try
-        {
-            grid.Children.Remove(WebView);
-            WebView.Dispose();
-        }
-        catch
-        {
-            /* ignore */
-        }
-
-        WebView = new Microsoft.Web.WebView2.Wpf.WebView2
-        {
-            DefaultBackgroundColor = System.Drawing.Color.FromArgb(0xFF, 0x20, 0x21, 0x24),
-            Visibility = Visibility.Collapsed,
-        };
-        System.Windows.Controls.Panel.SetZIndex(WebView, 0);
-        grid.Children.Insert(0, WebView);
-    }
-
-    /// <summary>
-    /// Ensure App WebView2 exists and has painted the React UI (under cloak / before show).
-    /// </summary>
-    internal async Task EnsureAppWebViewReadyAsync()
-    {
-        if (!_appWebViewParked && WebView2Safe.TryGetCore(WebView) is not null)
-        {
-            WebView.Visibility = Visibility.Visible;
-            WebViewSurfaceMemory.SetActive(WebView, true);
-            return;
-        }
-
-        if (_ensureAppWebViewTask is not null)
-        {
-            await _ensureAppWebViewTask;
-            return;
-        }
-
-        _ensureAppWebViewTask = RematerializeAppWebViewAsync();
-        try
-        {
-            await _ensureAppWebViewTask;
-        }
-        finally
-        {
-            _ensureAppWebViewTask = null;
-        }
-    }
-
-    private async Task RematerializeAppWebViewAsync()
-    {
-        var generation = _appWebViewGeneration;
-        BootSplash.Visibility = Visibility.Visible;
-        WebView.Visibility = Visibility.Visible;
-        await InitWebViewAsync();
-        if (generation != _appWebViewGeneration)
-        {
-            return;
-        }
-
-        if (WebView2Safe.TryGetCore(WebView) is { } core)
-        {
-            await WebViewReadyProbe.WaitUntilReadyAsync(core, maxAttempts: 50, intervalMs: 100);
-        }
-
-        if (generation != _appWebViewGeneration)
-        {
-            return;
-        }
-
-        _appWebViewParked = false;
-        WebViewSurfaceMemory.SetActive(WebView, true);
-        HideBootSplash();
-    }
+    internal void SetAppWebViewActive(bool active) => WebViewSurfaceMemory.SetActive(WebView, active);
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
@@ -631,7 +482,7 @@ public partial class MainWindow : Window
         CloakAppWindowAtBoot(_hwnd);
         _surfaces.MarkAppCloakedAtBoot();
         ApplyNativeWindowIcons(_hwnd);
-        // AppWindow stays top-level forever — never attach DesktopEmbedService to it.
+        // Single HWND: DesktopEmbedService attaches here on first EnterDesktopMode.
         DisableAppDwmTransitions(_hwnd);
         _hwndSource = HwndSource.FromHwnd(_hwnd);
         _hwndSource?.AddHook(WndProc);
@@ -680,12 +531,8 @@ public partial class MainWindow : Window
             await Task.Delay(400);
             try
             {
-                // If the React login wall already opened on App (not logged in yet) and
-                // claimed the suspend flag, embed Host but keep App visible on top instead
-                // of cloaking it away from under the open dialog — App.jsx resumes desktop
-                // embed itself once the dialog closes, same as every other temporary unlock.
-                // Re-checked right before the actual cloak decision (see shouldCloakApp
-                // doc) so a claim landing mid-await (Host webview cold-start) still wins.
+                // If the React login wall already opened and claimed suspend, stay
+                // top-level until the dialog closes (shouldCloakApp / preferDesktop).
                 await _surfaces.EnterDesktopModeAsync(
                     _embed.LockedBounds ?? CapturePhysicalBounds(),
                     shouldCloakApp: () => !_bridge.IsEmbedSuspended);
@@ -766,8 +613,7 @@ public partial class MainWindow : Window
 
     private async Task InitWebViewAsync(bool afterRuntimeInstall = false)
     {
-        // Opaque dark clear color — Transparent + dark UI can leave a blank surface in WebView2.
-        Environment.SetEnvironmentVariable("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", "0xFF202124");
+        Environment.SetEnvironmentVariable("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", "0xFFEEF0F2");
 
         if (!WebView2RuntimeGuide.IsRuntimeAvailable())
         {
@@ -802,7 +648,7 @@ public partial class MainWindow : Window
                 options: options);
             await WebView.EnsureCoreWebView2Async(env);
 
-            WebView.DefaultBackgroundColor = System.Drawing.Color.FromArgb(0xFF, 0x20, 0x21, 0x24);
+            WebView.DefaultBackgroundColor = System.Drawing.Color.FromArgb(255, 0xEE, 0xF0, 0xF2);
             WebView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
             WebView.CoreWebView2.Settings.IsStatusBarEnabled = false;
             WebView.CoreWebView2.Settings.AreDevToolsEnabled = true;
@@ -951,17 +797,11 @@ public partial class MainWindow : Window
 
     private async Task ProbeUiReadyAsync()
     {
-        var generation = _appWebViewGeneration;
         try
         {
             for (var attempt = 0; attempt < 40; attempt++)
             {
                 await Task.Delay(250);
-                // App may have been parked (disposed) for desktop single-WebView policy.
-                if (_appWebViewParked || generation != _appWebViewGeneration)
-                {
-                    return;
-                }
 
                 var core = WebView2Safe.TryGetCore(WebView);
                 if (core is null)
@@ -1554,14 +1394,8 @@ public partial class MainWindow : Window
 
         e.Cancel = true;
 
-        // Alt+F4 / system close while a temporary desktop-mode overlay (settings, quick-edit,
-        // auth, export) is open must not fall through to a bare Hide(): AppWindow would be
-        // hidden while DesktopHost is *also* already hidden underneath it (that is what the
-        // temporary unlock did), so the calendar would vanish from the desktop entirely with
-        // no visible surface at all — and NativeBridge's suspended flag would stay stuck true,
-        // silently swallowing every later quick-edit/settings open (SuspendFor* would think
-        // the window is already shown and skip re-showing it). Treat this exactly like the
-        // in-UI close button instead: cancel the overlay and resume the desktop surface.
+        // Alt+F4 / system close while a desktop-mode overlay is open: cancel the overlay
+        // (same as the in-UI close) instead of hiding the single surface.
         if (_bridge.CancelSuspendedOverlayIfActive())
         {
             return;

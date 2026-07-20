@@ -1,18 +1,15 @@
 using System.Text.Json.Nodes;
 using System.Windows;
+using MyDesktopCalendar;
 using MyDesktopCalendar.Native;
 
 namespace MyDesktopCalendar.Services;
 
 /// <summary>
-/// DesktopHost wallpaper embed. SetParent runs once; thereafter Show/Hide only.
-/// AppWindow must never be passed here — dual-HWND flicker rule #1.
-/// The only embed technique is <see cref="EmbedSysListView32"/>: DesktopHost becomes a
-/// real <c>WS_CHILD</c> of the desktop icon ListView (SysListView32), matching the
-/// CalendarTask/desktopcal host parenting model. SetWindowPos uses parent-client
-/// coordinates once parented. If SysListView32 can never be resolved (icons hidden by
-/// policy, remote/kiosk session, shell replacement), <see cref="Embed"/> throws and the
-/// caller falls back to window mode.
+/// Single-HWND desktop surface for <see cref="MainWindow"/>.
+/// Desktop mode: top-level <c>WS_POPUP</c> at the locked bounds, z-ordered to the bottom
+/// (sits on the desktop, covered by normal apps). No <c>SetParent</c> / SysListView32 child.
+/// Window mode: same HWND with thick-frame popup styles brought to the foreground.
 /// </summary>
 internal sealed class DesktopEmbedService
 {
@@ -40,31 +37,25 @@ internal sealed class DesktopEmbedService
     private Bounds? _lastAppliedBounds;
     private byte _alpha = 255;
     private System.Windows.Threading.DispatcherTimer? _maintenance;
-    private IntPtr _embedParent;
+
     /// <summary>
-    /// True once <see cref="EmbedSysListView32"/> has actually verified its parenting.
-    /// SysListView32/WS_CHILD is the only embed path this class has — see
-    /// <see cref="IsPopupStyleEmbed"/> — so this is false only before the first
-    /// successful embed of the process's lifetime. (Name kept for the JS/status API.)
+    /// Desktop mode uses a top-level <c>WS_POPUP</c>, so WebView2 receives native clicks.
+    /// Name retained for the status/JS API (<c>popupStyleEmbed</c>).
     /// </summary>
     private bool _popupStyleEmbed;
 
-    /// <summary>Host is parented under the shell (may be hidden).</summary>
+    /// <summary>Desktop-mode surface active (top-level WS_POPUP on the desktop z-band).</summary>
     public bool IsShellParented { get; private set; }
 
     /// <summary>Host HWND is visible on the desktop surface.</summary>
     public bool IsSurfaceVisible { get; private set; }
 
-    /// <summary>Shell-parented and currently the visible desktop surface.</summary>
+    /// <summary>Desktop mode and currently visible.</summary>
     public bool IsEmbedded => IsShellParented && IsSurfaceVisible;
 
     /// <summary>
-    /// True once actually embedded under SysListView32 as a <c>WS_CHILD</c> (see
-    /// <see cref="EmbedSysListView32"/>). The host sits in the ListView's own child
-    /// z-order (HWND_TOP), so real mouse input reaches WebView2 natively for its
-    /// client area. Callers (e.g. <see cref="UndockZoneMonitor"/>) must not also
-    /// synthesize click-zone matching for anything this native path already delivers,
-    /// or the same click ends up double-firing. Name retained for the status/JS API.
+    /// Always true in desktop mode (top-level popup). Zone monitors skip synthetic
+    /// create/edit clicks that would double-fire with native WebView input.
     /// </summary>
     public bool IsPopupStyleEmbed => _popupStyleEmbed;
 
@@ -82,14 +73,9 @@ internal sealed class DesktopEmbedService
     {
         _hwnd = hwnd;
         _lastAppliedBounds = null;
-        // Apply borderless styles ONCE. Never toggle during embed↔unlock (size flash source).
         ApplyStableBorderlessStyles(hwnd);
         DisableDwmTransitions(hwnd);
-        EnsureLayeredAlpha(hwnd);
-        // Do NOT call DwmExtendFrameIntoClientArea on DesktopHost. Even with zero margins it
-        // can put SHELLDLL_DefView / WorkerW into a washed-out (foggy) composition on some
-        // GPUs and Windows builds once the host is shell-parented. AppWindow frame theming
-        // is handled separately via WindowFrameTheme on MainWindow.
+        // Do NOT call DwmExtendFrameIntoClientArea while shell-parented (washes DefView).
         ApplyAlphaTree();
     }
 
@@ -97,6 +83,8 @@ internal sealed class DesktopEmbedService
     {
         _hostWindow = host;
     }
+
+    public IntPtr Hwnd => _hwnd;
 
     /// <summary>
     /// Re-apply DWM frame after theme/style changes.
@@ -110,7 +98,9 @@ internal sealed class DesktopEmbedService
     {
         var clamped = NormalizeOpacity(opacity);
         _alpha = (byte)Math.Clamp((int)Math.Round(clamped * 255.0), 13, 255);
-        ApplyWpfHostOpacity(clamped);
+        // Never use WPF Opacity for translucency (blends against a dark intermediate).
+        // See-through is a single Win32 LWA_ALPHA on the host HWND when alpha < 255.
+        ApplyWpfHostOpacity(1.0);
         ApplyAlphaTree();
     }
 
@@ -177,20 +167,11 @@ internal sealed class DesktopEmbedService
     }
 
     /// <summary>
-    /// Re-validate/re-anchor after a display-topology change (monitor sleep/wake, cable
-    /// reconnect, resolution/DPI/arrangement change). Explorer commonly recreates
-    /// Progman/WorkerW/DefView across these — the 5s maintenance tick's <see
-    /// cref="IsParentedTo"/> check would notice the mismatch but then keep retrying
-    /// <c>SetParent</c> against the now-dead cached <see cref="_embedParent"/> handle forever
-    /// (see <see cref="StartMaintenance"/>). This instead re-resolves the shell parent fresh
-    /// and forces a real re-embed through the normal <see cref="Embed"/> attempt-order path
-    /// when the cached parent is actually stale; otherwise it just re-clamps bounds and nudges
-    /// a repaint, since most display-change notifications don't actually break parenting.
+    /// After a display-topology change, reclamp locked bounds and re-assert
+    /// top-level popup desktop styles + z-order.
     /// </summary>
     public void HandleDisplayChanged()
     {
-        var wasVisible = false;
-        Bounds? boundsForReembed = null;
         lock (_gate)
         {
             _lastAppliedBounds = null;
@@ -204,41 +185,16 @@ internal sealed class DesktopEmbedService
                 return;
             }
 
-            wasVisible = IsSurfaceVisible;
-            var parentStale = _embedParent == IntPtr.Zero
-                || !Win32.IsWindow(_embedParent)
-                || !IsParentedTo(_hwnd, _embedParent);
-
-            if (!parentStale)
+            var target = _lockedBounds ?? GetCurrentBounds();
+            if (IsSurfaceVisible)
             {
-                var target = _lockedBounds ?? GetCurrentBounds();
-                SnapMoveAndSize(target);
-                return;
-            }
+                ApplyBorderlessPopupStyles(_hwnd);
+                if (!BoundsNearlyEqual(GetCurrentBounds(), target))
+                {
+                    SnapMoveAndSize(target);
+                }
 
-            // Force Embed()'s already-parented skip (IsShellParented && IsParentedTo) to fall
-            // through to its normal fresh-SetParent attempt order below, instead of duplicating
-            // that parent-resolution logic here.
-            IsShellParented = false;
-            boundsForReembed = _lockedBounds ?? GetCurrentBounds();
-        }
-
-        if (boundsForReembed is { } rebounds)
-        {
-            try
-            {
-                Embed(rebounds);
-            }
-            catch
-            {
-                /* best-effort — next manual apply/tray retry or 5s maintenance tick keeps trying */
-            }
-
-            if (!wasVisible)
-            {
-                // Re-embed always shows the surface — restore whatever hidden/suspended state
-                // (e.g. settings/quick-edit overlay open) was active before the display change.
-                HideSurface();
+                ApplyDesktopZOrder();
             }
         }
     }
@@ -255,71 +211,39 @@ internal sealed class DesktopEmbedService
             var targetBounds = Normalize(bounds ?? _lockedBounds ?? GetCurrentBounds());
             _lockedBounds = targetBounds;
 
-            // Already shell-parented: Show/Hide only — never SetParent again.
-            if (IsShellParented && _embedParent != IntPtr.Zero && IsParentedTo(_hwnd, _embedParent))
+            // Already in desktop popup mode — show/reposition only.
+            if (IsShellParented)
             {
                 ShowSurfaceUnlocked(targetBounds);
-                var active = _last.ActiveMode ?? "auto";
+                ApplyDesktopZOrder();
                 _last = new EmbedInfo(
                     true,
-                    active,
+                    "popup",
                     "auto",
-                    _last.Technique == "none" ? "parent" : _last.Technique,
+                    "ws-popup",
                     _last.Attempts,
                     DateTime.UtcNow.ToString("o"));
                 StartMaintenance(targetBounds);
                 return _last;
             }
 
-            ApplyAlphaTree();
-            _popupStyleEmbed = false;
-
-            var attempts = new List<object>();
-            try
+            EmbedAsTopLevelPopup(targetBounds);
+            var attempts = new List<object>
             {
-                if (EmbedSysListView32(targetBounds))
-                {
-                    SnapMoveAndSize(targetBounds);
-                    attempts.Add(new
-                    {
-                        mode = "syslistview32",
-                        ok = true,
-                        parent = _embedParent.ToInt64(),
-                        ancestor = Win32.GetAncestor(_hwnd, Win32.GA_PARENT).ToInt64(),
-                    });
-                    IsShellParented = true;
-                    IsSurfaceVisible = true;
-                    Win32.ShowWindow(_hwnd, Win32.SW_SHOW);
-
-                    _last = new EmbedInfo(
-                        true,
-                        "syslistview32",
-                        "auto",
-                        "parent",
-                        attempts,
-                        DateTime.UtcNow.ToString("o"));
-                    StartMaintenance(targetBounds);
-                    return _last;
-                }
-
-                attempts.Add(new
-                {
-                    mode = "syslistview32",
-                    ok = false,
-                    error = "unavailable",
-                    ancestor = Win32.GetAncestor(_hwnd, Win32.GA_PARENT).ToInt64(),
-                    getParent = Win32.GetParent(_hwnd).ToInt64(),
-                });
-            }
-            catch (Exception ex)
-            {
-                attempts.Add(new { mode = "syslistview32", ok = false, error = ex.Message });
-            }
-
-            _last = new EmbedInfo(false, null, "auto", "none", attempts, DateTime.UtcNow.ToString("o"));
-            var caps = DetectCapabilities();
-            throw new InvalidOperationException(
-                $"Desktop embed failed. Caps={caps}. Attempts: {string.Join("; ", attempts)}");
+                new { mode = "ws-popup", ok = true, zorder = "HWND_BOTTOM" },
+            };
+            IsShellParented = true;
+            IsSurfaceVisible = true;
+            _popupStyleEmbed = true;
+            _last = new EmbedInfo(
+                true,
+                "popup",
+                "auto",
+                "ws-popup",
+                attempts,
+                DateTime.UtcNow.ToString("o"));
+            StartMaintenance(targetBounds);
+            return _last;
         }
     }
 
@@ -338,7 +262,7 @@ internal sealed class DesktopEmbedService
         }
     }
 
-    /// <summary>Hide host; keep shell parent (no SetParent(null)).</summary>
+    /// <summary>Hide host; stay in desktop-mode style until <see cref="ReleaseShellHost"/>.</summary>
     public void HideSurface()
     {
         lock (_gate)
@@ -350,67 +274,58 @@ internal sealed class DesktopEmbedService
             }
 
             IsSurfaceVisible = false;
-            if (_hostWindow is DesktopHostWindow host)
-            {
-                host.SetSurfaceActive(false);
-            }
 
             _last = new EmbedInfo(
                 false,
                 null,
                 "auto",
-                IsShellParented ? "hidden-parented" : "none",
+                IsShellParented ? "hidden-popup" : "none",
                 [],
                 DateTime.UtcNow.ToString("o"));
         }
     }
 
     /// <summary>
-    /// Fully detach DesktopHost from the shell and drop HWND ownership so the Host
-    /// WebView2 process tree can be disposed (single-WebView memory policy).
-    /// Next desktop enter must <see cref="Attach"/> a new HWND and <see cref="Embed"/> again.
+    /// Leave desktop mode: raise z-order only. Styles and footprint stay identical
+    /// so the window does not resize on every mode toggle.
     /// </summary>
-    public void ReleaseShellHost()
+    public void ReleaseShellHost(Bounds? topLevelBounds = null)
     {
         lock (_gate)
         {
             StopMaintenance();
-            if (_hwnd != IntPtr.Zero && Win32.IsWindow(_hwnd))
+            var hwnd = _hwnd;
+            if (hwnd != IntPtr.Zero && Win32.IsWindow(hwnd))
             {
-                try
-                {
-                    Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
-                }
-                catch
-                {
-                    /* ignore */
-                }
-
-                if (IsShellParented)
-                {
-                    try
-                    {
-                        Win32.SetParent(_hwnd, IntPtr.Zero);
-                    }
-                    catch
-                    {
-                        /* ignore */
-                    }
-                }
+                // Remember live rect for persistence — do not SetWindowPos size/pos.
+                var live = GetCurrentBounds();
+                _lockedBounds = Normalize(topLevelBounds ?? live);
+                _lastAppliedBounds = live;
+                // ApplyBorderlessPopupStyles already manages WS_EX_LAYERED consistently
+                // for the current alpha. A second blind re-add here (old EnsureLayeredAlpha)
+                // set WS_EX_LAYERED without SWP_FRAMECHANGED right after it had just been
+                // cleared, leaving DWM's redirection surface inconsistent for a frame —
+                // that was the recurring black side-bar flash on every mode toggle.
+                ApplyBorderlessPopupStyles(hwnd);
+                _ = Win32.SetWindowPos(
+                    hwnd,
+                    Win32.HWND_TOP,
+                    0,
+                    0,
+                    0,
+                    0,
+                    Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_SHOWWINDOW | Win32.SWP_NOACTIVATE);
+                Win32.ShowWindow(hwnd, Win32.SW_SHOW);
             }
 
             IsShellParented = false;
-            IsSurfaceVisible = false;
+            IsSurfaceVisible = hwnd != IntPtr.Zero && Win32.IsWindow(hwnd);
             _popupStyleEmbed = false;
-            _embedParent = IntPtr.Zero;
-            _hwnd = IntPtr.Zero;
-            _hostWindow = null;
-            _lastAppliedBounds = null;
             _last = new EmbedInfo(
                 false,
                 null,
                 "auto",
-                "none",
+                "window",
                 [],
                 DateTime.UtcNow.ToString("o"));
         }
@@ -424,20 +339,9 @@ internal sealed class DesktopEmbedService
         }
 
         _lockedBounds = targetBounds;
-        if (_hostWindow is DesktopHostWindow host)
-        {
-            host.SetSurfaceActive(true);
-        }
-
-        Win32.ShowWindow(_hwnd, Win32.SW_SHOW);
-
-        // Skip the move/resize entirely when geometry hasn't changed since it was last applied
-        // (the common case on settings/quick-edit resume — Host was only hidden, never moved).
-        if (_lastAppliedBounds != targetBounds)
-        {
-            SnapMoveAndSize(targetBounds);
-        }
-
+        Win32.ShowWindow(_hwnd, Win32.SW_SHOWNOACTIVATE);
+        // Desktop show: z-order only — never resize (mode toggle / resume).
+        ApplyDesktopZOrder();
         IsSurfaceVisible = true;
         ApplyAlphaTree();
     }
@@ -500,10 +404,9 @@ internal sealed class DesktopEmbedService
             ["surfaceVisible"] = IsSurfaceVisible,
             ["editing"] = !IsEmbedded,
             ["editMode"] = !IsEmbedded,
-            ["dualHwnd"] = true,
+            ["dualHwnd"] = false,
             ["platform"] = "wpf-native",
-            // SysListView32/WS_CHILD embed — lets the renderer know real clicks reach its
-            // own DOM directly (see Header.jsx withUiSuspend's Settings-in-place branch).
+            // Top-level WS_POPUP desktop mode — native clicks reach the WebView DOM.
             ["popupStyleEmbed"] = _popupStyleEmbed,
             ["opacity"] = GetOpacity(),
             ["bounds"] = (_lockedBounds ?? GetCurrentBounds()) is var b
@@ -552,93 +455,50 @@ internal sealed class DesktopEmbedService
         return Win32.FindWindowExW(defView, IntPtr.Zero, "SysListView32", null) != IntPtr.Zero;
     }
 
-    private bool EmbedSysListView32(Bounds screenBounds)
+    /// <summary>
+    /// Desktop mode: same borderless popup styles as window mode, z-ordered to
+    /// <c>HWND_BOTTOM</c>. No size/position recalculation — a mode toggle only ever
+    /// changes style + z-order, never touches the HWND's live footprint. Whatever the
+    /// window was positioned/sized at (via <see cref="SnapMoveAndSize"/> on boot/restore
+    /// or plain user resize) carries over untouched.
+    /// </summary>
+    private void EmbedAsTopLevelPopup(Bounds screenBounds)
     {
-        var progman = FindProgman();
-        if (progman == IntPtr.Zero)
-        {
-            return false;
-        }
-
-        SpawnWorkerW(progman);
-
-        var defView = FindDefViewUnder(progman);
-        if (defView == IntPtr.Zero)
-        {
-            defView = FindDesktopDefView();
-        }
-
-        if (defView == IntPtr.Zero)
-        {
-            return false;
-        }
-
-        var listView = Win32.FindWindowExW(defView, IntPtr.Zero, "SysListView32", null);
-        if (listView == IntPtr.Zero)
-        {
-            return false;
-        }
-
+        ApplyBorderlessPopupStyles(_hwnd);
+        ApplyWpfHostOpacity(1.0);
         ApplyAlphaTree();
-        PrepareAsListViewChild(_hwnd);
-        Win32.SetParent(_hwnd, listView);
-        _embedParent = listView;
 
-        // WS_CHILD SetWindowPos is parent-client relative. Raise to the top of the
-        // ListView's own child z-order so the surface sits above the desktop icons.
-        var client = ScreenToParentClient(screenBounds);
-        Win32.SetWindowPos(
-            _hwnd,
-            Win32.HWND_TOP,
-            client.X,
-            client.Y,
-            client.Width,
-            client.Height,
-            Win32.SWP_NOACTIVATE | Win32.SWP_FRAMECHANGED | Win32.SWP_NOREDRAW);
+        _ = screenBounds;
+        _lockedBounds = GetCurrentBounds();
+        _lastAppliedBounds = _lockedBounds;
 
-        ApplyAlphaTree();
-        TryRefreshShellDesktopComposition(progman);
-
-        var verified = IsParentedTo(_hwnd, listView);
-        _popupStyleEmbed = verified;
-        return verified;
+        ApplyDesktopZOrder();
+        Win32.ShowWindow(_hwnd, Win32.SW_SHOWNOACTIVATE);
+        _popupStyleEmbed = true;
     }
 
-    /// <summary>
-    /// After raise-desktop / SetParent, some machines leave wallpaper or icons looking washed
-    /// until the shell surfaces are redrawn. Harmless no-op when handles are stale.
-    /// </summary>
-    private static void TryRefreshShellDesktopComposition(IntPtr shellParent)
+    private static bool BoundsNearlyEqual(Bounds a, Bounds b)
+        => Math.Abs(a.X - b.X) <= 1
+           && Math.Abs(a.Y - b.Y) <= 1
+           && Math.Abs(a.Width - b.Width) <= 1
+           && Math.Abs(a.Height - b.Height) <= 1;
+
+    /// <summary>Park the calendar under ordinary app windows (desktop wallpaper band).</summary>
+    private void ApplyDesktopZOrder()
     {
-        try
+        if (_hwnd == IntPtr.Zero || !Win32.IsWindow(_hwnd))
         {
-            const uint flags = Win32.RDW_INVALIDATE | Win32.RDW_ERASE | Win32.RDW_ALLCHILDREN | Win32.RDW_UPDATENOW;
-            var progman = FindProgman();
-            if (progman != IntPtr.Zero)
-            {
-                _ = Win32.RedrawWindow(progman, IntPtr.Zero, IntPtr.Zero, flags);
-            }
-
-            if (shellParent != IntPtr.Zero && shellParent != progman)
-            {
-                _ = Win32.RedrawWindow(shellParent, IntPtr.Zero, IntPtr.Zero, flags);
-            }
-
-            var defView = FindDefViewUnder(shellParent);
-            if (defView == IntPtr.Zero)
-            {
-                defView = FindDefViewUnder(progman);
-            }
-
-            if (defView != IntPtr.Zero)
-            {
-                _ = Win32.RedrawWindow(defView, IntPtr.Zero, IntPtr.Zero, flags);
-            }
+            return;
         }
-        catch
-        {
-            /* ignore */
-        }
+
+        _ = Win32.SetWindowPos(
+            _hwnd,
+            Win32.HWND_BOTTOM,
+            0,
+            0,
+            0,
+            0,
+            Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE | Win32.SWP_SHOWWINDOW);
     }
 
     private void StartMaintenance(Bounds bounds)
@@ -655,29 +515,8 @@ internal sealed class DesktopEmbedService
                 return;
             }
 
-            if (_embedParent != IntPtr.Zero)
-            {
-                if (!IsParentedTo(_hwnd, _embedParent))
-                {
-                    try
-                    {
-                        PrepareAsListViewChild(_hwnd);
-                        Win32.SetParent(_hwnd, _embedParent);
-                        SnapMoveOnly(bounds);
-                    }
-                    catch
-                    {
-                        /* ignore */
-                    }
-                }
-
-                // WS_CHILD uses parent-client coordinates (see SnapMoveOnly).
-                if (_lastAppliedBounds != bounds)
-                {
-                    SnapMoveOnly(bounds);
-                }
-            }
-
+            // Re-assert bottom z-order only — never restyle/resize (that jumped size on toggle).
+            ApplyDesktopZOrder();
             ApplyAlphaTree();
         };
         _maintenance.Start();
@@ -709,78 +548,6 @@ internal sealed class DesktopEmbedService
             sizeof(int));
     }
 
-    /// <summary>
-    /// Style prep for the SysListView32 embed path (see <see cref="EmbedSysListView32"/>).
-    /// Makes DesktopHost a real <c>WS_CHILD</c> of the ListView (CalendarTask/desktopcal
-    /// host model). Clears <c>WS_POPUP</c> so SetWindowPos is parent-client relative.
-    /// </summary>
-    private static void PrepareAsListViewChild(IntPtr hwnd)
-    {
-        var style = Win32.GetWindowLongPtrCompat(hwnd, Win32.GWL_STYLE).ToInt64();
-        style |= Win32.WS_CHILD | Win32.WS_VISIBLE | Win32.WS_CLIPSIBLINGS | Win32.WS_CLIPCHILDREN;
-        style &= unchecked((long)~(uint)Win32.WS_POPUP);
-        style &= ~(Win32.WS_CAPTION | Win32.WS_SYSMENU | Win32.WS_MINIMIZEBOX | Win32.WS_MAXIMIZEBOX | Win32.WS_THICKFRAME);
-        Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_STYLE, new IntPtr(style));
-
-        // About to SetParent under the shell — do not keep WS_EX_LAYERED (desktop haze).
-        ClearLayeredStyle(hwnd);
-    }
-
-    /// <summary>
-    /// Convert screen bounds to <see cref="_embedParent"/> client coordinates for
-    /// <c>WS_CHILD</c> SetWindowPos. Falls back to the input when the parent is missing.
-    /// </summary>
-    private Bounds ScreenToParentClient(Bounds screen)
-    {
-        if (_embedParent == IntPtr.Zero || !Win32.IsWindow(_embedParent))
-        {
-            return screen;
-        }
-
-        var origin = new Win32.POINT { X = screen.X, Y = screen.Y };
-        if (!Win32.ScreenToClient(_embedParent, ref origin))
-        {
-            return screen;
-        }
-
-        return new Bounds(origin.X, origin.Y, screen.Width, screen.Height);
-    }
-
-    private static bool IsParentedTo(IntPtr hwnd, IntPtr expectedParent)
-    {
-        if (hwnd == IntPtr.Zero || expectedParent == IntPtr.Zero)
-        {
-            return false;
-        }
-
-        var ancestor = Win32.GetAncestor(hwnd, Win32.GA_PARENT);
-        if (ancestor == expectedParent)
-        {
-            return true;
-        }
-
-        // Fallback: after WS_CHILD, GetParent should also match.
-        return Win32.GetParent(hwnd) == expectedParent;
-    }
-
-    /// <summary>
-    /// Apply <c>WS_EX_LAYERED</c> + alpha via SetLayeredWindowAttributes (LWA_ALPHA).
-    /// Top-level: root only (children are blended with the parent). Shell-parented child:
-    /// walk WebView2 descendant HWNDs — alpha on the WPF host alone leaves Chromium opaque.
-    /// </summary>
-    private void EnsureLayeredAlpha(IntPtr hwnd)
-    {
-        var shellParented = _embedParent != IntPtr.Zero || IsShellParented;
-        if (shellParented)
-        {
-            ApplyLayeredAlphaRecursive(hwnd, _alpha);
-        }
-        else
-        {
-            ApplyLayeredAlphaToWindow(hwnd, _alpha);
-        }
-    }
-
     private static void ApplyLayeredAlphaToWindow(IntPtr hwnd, byte alpha)
     {
         if (hwnd == IntPtr.Zero || !Win32.IsWindow(hwnd))
@@ -797,25 +564,9 @@ internal sealed class DesktopEmbedService
         _ = Win32.SetLayeredWindowAttributes(hwnd, 0, alpha, Win32.LWA_ALPHA);
     }
 
-    private static void ApplyLayeredAlphaRecursive(IntPtr hwnd, byte alpha)
-    {
-        ApplyLayeredAlphaToWindow(hwnd, alpha);
-        if (hwnd == IntPtr.Zero || !Win32.IsWindow(hwnd))
-        {
-            return;
-        }
-
-        _ = Win32.EnumChildWindows(hwnd, (child, _) =>
-        {
-            ApplyLayeredAlphaRecursive(child, alpha);
-            return true;
-        }, IntPtr.Zero);
-    }
-
     /// <summary>
-    /// Remove WS_EX_LAYERED from a shell-parented Host. Layered composition under
-    /// Progman/WorkerW/DefView leaves a milky wash over the whole desktop on some machines
-    /// even at alpha 255; non-layered opaque HWND avoids that path.
+    /// Remove WS_EX_LAYERED from a window tree. Fully-opaque layered under DefView can
+    /// fog wallpaper/icons on some GPU/driver builds.
     /// </summary>
     private static void ClearLayeredStyle(IntPtr hwnd)
     {
@@ -859,19 +610,15 @@ internal sealed class DesktopEmbedService
             return;
         }
 
-        // Never DwmExtendFrameIntoClientArea on DesktopHost (washes the shell).
-        // Fully opaque + shell-parented: drop WS_EX_LAYERED — opaque layered under
-        // DefView still fogs wallpaper/icons on a subset of GPU/driver builds.
-        // Translucent: layered alpha on Host + WebView2 child HWNDs.
-        var shellParented = _embedParent != IntPtr.Zero || IsShellParented;
-        if (shellParented && _alpha >= 255)
+        // Fully opaque: drop layered styles (avoids milky/dark DefView wash).
+        if (_alpha >= 255)
         {
             ClearLayeredStyle(_hwnd);
+            return;
         }
-        else
-        {
-            EnsureLayeredAlpha(_hwnd);
-        }
+
+        // One alpha on the host HWND only. Per-Chromium-child LWA double-darkened the UI.
+        ApplyLayeredAlphaToWindow(_hwnd, _alpha);
     }
 
     private void ApplyWpfHostOpacity(double opacity)
@@ -905,39 +652,60 @@ internal sealed class DesktopEmbedService
     }
 
     /// <summary>
-    /// Stable borderless styles applied once at attach — never toggled on embed/unlock.
-    /// Keep WS_THICKFRAME so WPF CanResize still works in window mode.
+    /// Shared borderless popup styles for desktop and window mode (and initial Attach).
+    /// Same bits both modes — toggling must not add/remove <c>WS_THICKFRAME</c> (that resized the window).
     /// </summary>
-    private void ApplyStableBorderlessStyles(IntPtr hwnd)
+    private void ApplyStableBorderlessStyles(IntPtr hwnd) => ApplyBorderlessPopupStyles(hwnd);
+
+    /// <summary>Alias kept for call sites that previously meant "window chrome".</summary>
+    private void RestoreTopLevelStyles(IntPtr hwnd) => ApplyBorderlessPopupStyles(hwnd);
+
+    private void ApplyBorderlessPopupStyles(IntPtr hwnd)
     {
+        if (hwnd == IntPtr.Zero || !Win32.IsWindow(hwnd))
+        {
+            return;
+        }
+
         var style = Win32.GetWindowLongPtrCompat(hwnd, Win32.GWL_STYLE).ToInt64();
-        style |= Win32.WS_POPUP | Win32.WS_VISIBLE | Win32.WS_THICKFRAME;
-        style &= ~Win32.WS_CHILD;
-        style &= ~(Win32.WS_CAPTION | Win32.WS_SYSMENU | Win32.WS_MINIMIZEBOX | Win32.WS_MAXIMIZEBOX);
-        Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_STYLE, new IntPtr(style));
+        var nextStyle = style;
+        nextStyle |= Win32.WS_POPUP | Win32.WS_VISIBLE | Win32.WS_THICKFRAME;
+        nextStyle &= ~Win32.WS_CHILD;
+        nextStyle &= ~(Win32.WS_CAPTION | Win32.WS_SYSMENU | Win32.WS_MINIMIZEBOX | Win32.WS_MAXIMIZEBOX);
 
         var ex = Win32.GetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE).ToInt64();
-        ex |= Win32.WS_EX_TOOLWINDOW | Win32.WS_EX_LAYERED;
-        ex &= ~(Win32.WS_EX_APPWINDOW | Win32.WS_EX_NOACTIVATE);
-        Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE, new IntPtr(ex));
-        _ = Win32.SetLayeredWindowAttributes(hwnd, 0, _alpha, Win32.LWA_ALPHA);
+        var nextEx = ex;
+        nextEx |= Win32.WS_EX_TOOLWINDOW;
+        nextEx &= ~(Win32.WS_EX_APPWINDOW | Win32.WS_EX_NOACTIVATE);
+        if (_alpha >= 255)
+        {
+            nextEx &= ~Win32.WS_EX_LAYERED;
+        }
+
+        if (nextStyle == style && nextEx == ex)
+        {
+            return;
+        }
+
+        Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_STYLE, new IntPtr(nextStyle));
+        if (_alpha >= 255)
+        {
+            Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE, new IntPtr(nextEx));
+            ClearLayeredStyle(hwnd);
+        }
+        else
+        {
+            Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE, new IntPtr(nextEx));
+            ApplyLayeredAlphaToWindow(hwnd, _alpha);
+        }
+
+        // GWL_STYLE/EXSTYLE + SWP_FRAMECHANGED (inside ClearLayeredStyle) resets the
+        // DWM border/caption color attributes to the system default — reassert the
+        // theme border immediately so no default (often near-black) hairline shows.
+        WindowFrameTheme.Reapply();
     }
 
-    /// <summary>
-    /// True when <see cref="_hwnd"/> is a real <c>WS_CHILD</c> of <see cref="_embedParent"/>
-    /// — SetWindowPos must then use parent-client coordinates. Prefer this over
-    /// <see cref="IsShellParented"/> so the first Snap after SetParent (before the
-    /// flag flips) still converts correctly.
-    /// </summary>
-    private bool UsesParentClientCoords =>
-        _embedParent != IntPtr.Zero
-        && Win32.IsWindow(_embedParent)
-        && IsParentedTo(_hwnd, _embedParent);
-
-    /// <summary>
-    /// Reposition without changing size (eliminates transition flash).
-    /// When shell-parented as <c>WS_CHILD</c>, converts screen bounds to parent-client.
-    /// </summary>
+    /// <summary>Reposition without changing size (eliminates transition flash).</summary>
     private void SnapMoveOnly(Bounds screen)
     {
         if (_hwnd == IntPtr.Zero)
@@ -945,18 +713,17 @@ internal sealed class DesktopEmbedService
             return;
         }
 
-        var pos = UsesParentClientCoords ? ScreenToParentClient(screen) : screen;
         Win32.SetWindowPos(
             _hwnd,
             IntPtr.Zero,
-            pos.X,
-            pos.Y,
+            screen.X,
+            screen.Y,
             0,
             0,
             Win32.SWP_NOSIZE | Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE);
     }
 
-    /// <summary>Place host at screen bounds with explicit size (first attach / host boot).</summary>
+    /// <summary>Place host at screen bounds with explicit size.</summary>
     private void SnapMoveAndSize(Bounds screen)
     {
         if (_hwnd == IntPtr.Zero)
@@ -964,21 +731,19 @@ internal sealed class DesktopEmbedService
             return;
         }
 
-        var pos = UsesParentClientCoords ? ScreenToParentClient(screen) : screen;
         Win32.SetWindowPos(
             _hwnd,
             IntPtr.Zero,
-            pos.X,
-            pos.Y,
-            pos.Width,
-            pos.Height,
+            screen.X,
+            screen.Y,
+            screen.Width,
+            screen.Height,
             Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE);
 
         if (_hostWindow is not null)
         {
             try
             {
-                // WPF Left/Top are still screen-space regardless of Win32 child parenting.
                 WindowFootprint.Sync(_hostWindow, screen);
             }
             catch

@@ -10,15 +10,9 @@
     }
   }
 
-  /** Which WebView2 surface this script instance is running in (dual-HWND). */
+  /** Single-HWND shell — always the app surface. */
   function currentSurface() {
-    try {
-      return new URLSearchParams(window.location.search).get('surface') === 'desktop'
-        ? 'desktop'
-        : 'app';
-    } catch {
-      return 'app';
-    }
+    return 'app';
   }
 
   function ensureNativeListener() {
@@ -45,6 +39,9 @@
       }
       if (data.type === 'widget-status' && data.status) {
         dispatchWidgetStatus(data.status);
+      }
+      if (data.type === 'shell-opacity' && data.opacity != null) {
+        window.dispatchEvent(new CustomEvent('mycalendar:shellOpacity', { detail: { opacity: data.opacity } }));
       }
       if (data.type === 'server-mode-changed') {
         window.dispatchEvent(new CustomEvent('mycalendar:serverModeChanged', { detail: data }));
@@ -102,6 +99,12 @@
   }
 
   function dispatchWidgetStatus(detail) {
+    try {
+      // Sync desktop-mode UX flag for isDesktopSurfaceHost() (wallpaper embed).
+      window.__myCalDesktopEmbedded = Boolean(detail?.embedded);
+    } catch {
+      /* ignore */
+    }
     window.dispatchEvent(new CustomEvent('mycalendar:widgetStatusChanged', { detail }));
     if (detail && typeof detail === 'object') {
       maybeDispatchPendingCreate(detail);
@@ -183,18 +186,7 @@
   let lastPendingEditToken = 0;
   let lastPendingUiToken = 0;
 
-  function isDesktopSurfaceHost() {
-    try {
-      return new URLSearchParams(window.location.search).get('surface') === 'desktop';
-    } catch {
-      return false;
-    }
-  }
-
   function maybeDispatchPendingCreate(status) {
-    if (isDesktopSurfaceHost()) {
-      return;
-    }
     const dateKey = status?.pendingCreateDate;
     const token = Number(status?.suspendToken) || 0;
     if (!dateKey || !token || token === lastPendingCreateToken) {
@@ -209,9 +201,6 @@
   }
 
   function maybeDispatchPendingEdit(status) {
-    if (isDesktopSurfaceHost()) {
-      return;
-    }
     const pending = status?.pendingEditEvent;
     const token = Number(status?.suspendToken) || 0;
     if (!pending?.eventId || !pending?.dayKey || !token || token === lastPendingEditToken) {
@@ -227,26 +216,6 @@
 
   function maybeDispatchPendingUiAction(status) {
     const action = status?.pendingUiAction;
-    // DesktopHost: chrome nav only. Settings/search unlock to App window mode.
-    if (isDesktopSurfaceHost()) {
-      // hide/show-events and hide/show-completed sync via store-updated only —
-      // never as pendingUiAction mirrors (that raced the PATCH and double-toggled).
-      const allowed = new Set([
-        'prev',
-        'next',
-        'today',
-        'prev-year',
-        'next-year',
-        'reload',
-        'view-mode',
-        'view-month',
-        'view-week',
-        'view-year',
-      ]);
-      if (!allowed.has(String(action || ''))) {
-        return;
-      }
-    }
     const token = Number(status?.suspendToken) || 0;
     if (!action || !token || token === lastPendingUiToken) {
       return;
@@ -291,7 +260,7 @@
 
   async function resumeDesktopEmbed() {
     if (!requireNativeHost()) return { available: false };
-    // Dual-HWND surface switch: show DesktopHost, hide App (no SetParent).
+    // Re-enter wallpaper embed (SetParent SysListView32) after window-mode UI.
     const result = await api('POST', '/api/desktop/widget/resume');
     dispatchWidgetStatus(result);
     return result;
@@ -318,10 +287,9 @@
   }
 
   /**
-   * Claims the desktop-embed suspend flag before the native shell's own deferred first
-   * embed (~400ms after window load) has run — used by the login wall so a dialog opened
-   * on App at boot isn't silently cloaked away the moment DesktopHost attaches. No-ops
-   * (claimed:false) once shell-parenting has already started elsewhere.
+   * Claims the desktop-embed suspend flag before the native shell's deferred first
+   * embed (~400ms after load) — used by the login wall so a dialog opened at boot
+   * isn't replaced by wallpaper embed. No-ops once shell-parenting has started.
    */
   async function claimBootSuspendForAuth() {
     if (!requireNativeHost()) return { claimed: false };

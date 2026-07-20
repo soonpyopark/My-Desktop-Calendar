@@ -52,9 +52,12 @@ export default function EventDetailContent({ event, calendar, dayKey, tags = [] 
                   </svg>
                   <a
                     href={item.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
                     className="min-w-0 break-all text-gcal-blue hover:underline"
                     onClick={(e) => {
                       e.preventDefault();
+                      e.stopPropagation();
                       void openExternalUrl(item.url);
                     }}
                   >

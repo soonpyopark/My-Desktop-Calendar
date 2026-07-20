@@ -45,27 +45,11 @@ import {
   resolveEffectiveColorScheme,
 } from './lib/colorScheme.js';
 import { applyAccentColor, getAccentColor, readStoredAccentColor } from './lib/accentColor.js';
+import { applyShellOpacity } from './lib/shellOpacity.js';
 import { notifyShellReady } from './lib/notifyShellReady.js';
-import { isNativeHost, onNativeEvent } from './lib/nativeHost.js';
+import { isNativeHost } from './lib/nativeHost.js';
 import { isDesktopSurfaceHost, isNeutralinoDesktopShell } from './lib/isNeutralinoDesktopShell.js';
 import { DEFAULT_SETTINGS, DEFAULT_VIEW_OPTIONS, HOLIDAYS_KR_CALENDAR_ID } from '../shared/constants.js';
-
-// hide/show-events and hide/show-completed are intentionally absent — they're
-// persisted settings that already reach this surface via the store-updated
-// broadcast (see Header.jsx's STORE_SYNCED_UI_ACTIONS), so Header no longer sends
-// them as a chrome-nav mirror at all.
-const HOST_CHROME_NAV_ACTIONS = new Set([
-  'prev',
-  'next',
-  'today',
-  'prev-year',
-  'next-year',
-  'open-web',
-  'view-mode',
-  'view-month',
-  'view-week',
-  'view-year',
-]);
 
 function parseLocalDateKey(key) {
   if (typeof key !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(key)) return null;
@@ -95,7 +79,6 @@ export default function App() {
   const [loginError, setLoginError] = useState(null);
   const [exporting, setExporting] = useState(false);
   const [monthAlign, setMonthAlign] = useState({ token: 0, target: 'month' });
-  const applyingViewNavRef = useRef(false);
   // Always-fresh viewMode for scroll-settle callbacks below — reportVisibleMonth can fire
   // from a late/trailing native scroll event on the *previous* mode's scroll container
   // right as the user switches view modes. Reading a useCallback closure's captured
@@ -114,74 +97,23 @@ export default function App() {
     setMonthAlign((prev) => ({ token: prev.token + 1, target }));
   }, []);
 
-  // Keep App ↔ DesktopHost on the same month/week (dual WebView2 profiles).
-  useEffect(() => {
-    if (!isNativeHost()) return undefined;
-    return onNativeEvent((data) => {
-      if (!data || data.type !== 'view-nav') return;
-      const nextView = parseLocalDateKey(data.viewDate);
-      const nextSelected = parseLocalDateKey(data.selectedDate);
-      if (!nextView || !nextSelected) return;
-
-      const viewKey = toDateKey(nextView);
-      const selectedKey = toDateKey(nextSelected);
-      const mode = data.viewMode;
-      const modeOk = mode === 'month' || mode === 'week' || mode === 'year';
-
-      applyingViewNavRef.current = true;
-      if (modeOk) {
-        setViewMode((prev) => (prev === mode ? prev : mode));
-      }
-      setViewDate((prev) => (toDateKey(prev) === viewKey ? prev : nextView));
-      setSelectedDate((prev) => (toDateKey(prev) === selectedKey ? prev : nextSelected));
-      // Always anchor on the incoming selectedDate/viewDate ('month' target — see
-      // runViewportAlign), never hardcode 'today'. The other surface may be several
-      // weeks away from today; forcing 'today' here re-scrolled the body to today's
-      // week while the header already showed the synced (different) week — a visible
-      // header/body date mismatch during rapid nav on the other surface.
-      requestMonthAlign('month');
-      window.requestAnimationFrame(() => {
-        applyingViewNavRef.current = false;
-      });
-    });
-  }, [requestMonthAlign]);
-
-  useEffect(() => {
-    if (!isNativeHost() || applyingViewNavRef.current) return;
-    window.myCalendar?.publishViewNav?.({
-      viewMode,
-      viewDate: toDateKey(viewDate),
-      selectedDate: toDateKey(selectedDate),
-    });
-  }, [viewDate, selectedDate, viewMode]);
-
   const resumeDesktopEmbedIfNeeded = useCallback(async () => {
     if (!isNeutralinoDesktopShell() || !window.myCalendar?.resumeDesktopEmbed) {
       return;
     }
-    // Wallpaper surface must never trigger resume (would race App overlays).
-    try {
-      if (new URLSearchParams(window.location.search).get('surface') === 'desktop') {
-        return;
-      }
-    } catch {
-      /* ignore */
-    }
     try {
       const status = await window.myCalendar.getWidgetStatus?.();
-      // Only return to DesktopHost after a temporary App overlay — never force desktop
-      // from intentional window mode (even if settings.json still says launchMode=desktop).
+      // Resume only after a temporary overlay — never force desktop from intentional window mode.
       if (!status?.resumeDesktopPending && !status?.embedSuspended) {
         return;
       }
-      // Dual-HWND: Show DesktopHost + Hide App — no SetParent.
       await window.myCalendar.resumeDesktopEmbed();
     } catch {
       /* ignore */
     }
   }, []);
 
-  /** Dual-HWND surface switch (legacy name kept for call sites). */
+  /** Re-embed after overlay close (legacy name kept for call sites). */
   const resumeDesktopEmbedUnderCover = useCallback(async () => {
     if (!isNeutralinoDesktopShell() || !window.myCalendar?.getWidgetStatus) {
       return false;
@@ -198,7 +130,7 @@ export default function App() {
     return true;
   }, [resumeDesktopEmbedIfNeeded]);
 
-  /** Unmount overlays first, then switch surface back to DesktopHost. */
+  /** Unmount overlays first, then re-enter wallpaper embed if pending. */
   const resumeDesktopEmbedAfterPaint = useCallback(async () => {
     if (!isNeutralinoDesktopShell() || !window.myCalendar?.getWidgetStatus) {
       return;
@@ -358,11 +290,7 @@ export default function App() {
     if (settingsOpen) {
       return;
     }
-    // Reachable on the DesktopHost surface too — Header's own onClick calls this
-    // directly (no native unlock) under SysListView32/WS_POPUP embed, opening the
-    // panel in place exactly like Settings/the quick-edit popover. The old permanent
-    // isDesktopSurfaceHost() guard here only made sense back when Search always had
-    // to unlock/undock to the App window first.
+    // Opens in place on the single surface (desktop embed or window mode).
     assertCurrentColorScheme();
     setSearchOpen(true);
   }, [assertCurrentColorScheme, settingsOpen]);
@@ -790,25 +718,18 @@ export default function App() {
   }, [isLoggedIn, openDayQuickEdit, resolveDayQuickEditRect, store?.calendars]);
 
   // Embedded day/event double-click → native undock + pending create/edit → open editor.
-  // Embedded search click → permanent window unlock + pending UI action → open panel.
-  // Embedded settings click → temporary window unlock + pending UI action → open panel
-  // (closeSettings resumes desktop embed automatically).
+  // Embedded search/settings/… → pending UI action → open panel in place (no undock).
   useEffect(() => {
     if (!isNeutralinoDesktopShell()) {
       return undefined;
     }
 
-    const hostSurface = isDesktopSurfaceHost();
     let cancelled = false;
     let lastCreateToken = 0;
     let lastEditToken = 0;
     let lastUiToken = 0;
 
     const openFromPendingCreate = async (dateKey, token) => {
-      // DesktopHost must not consume create/edit — App opens those overlays after suspend.
-      if (hostSurface) {
-        return;
-      }
       if (!isLoggedIn) {
         void resumeDesktopEmbedIfNeeded();
         return;
@@ -832,9 +753,6 @@ export default function App() {
     };
 
     const openFromPendingEdit = async (pending, token) => {
-      if (hostSurface) {
-        return;
-      }
       if (!isLoggedIn) {
         void resumeDesktopEmbedIfNeeded();
         return;
@@ -865,10 +783,6 @@ export default function App() {
 
     const openFromPendingUi = async (action, token) => {
       if (!action || !token || token === lastUiToken) {
-        return;
-      }
-      // Host: chrome nav only; never ack App-only overlays (settings/search/…).
-      if (hostSurface && !HOST_CHROME_NAV_ACTIONS.has(action)) {
         return;
       }
       lastUiToken = token;
@@ -1247,11 +1161,6 @@ export default function App() {
       void resumeDesktopEmbedIfNeeded();
     };
 
-    // DesktopHost: chrome nav only. Settings/search open on App after window unlock.
-    if (isDesktopSurfaceHost() && !HOST_CHROME_NAV_ACTIONS.has(action)) {
-      return;
-    }
-
     switch (action) {
       case 'search':
         if (settingsOpen) {
@@ -1262,7 +1171,7 @@ export default function App() {
         setSearchOpen(true);
         return;
       case 'settings':
-        if (isDesktopSurfaceHost() || !isLoggedIn || searchOpen) {
+        if (!isLoggedIn || searchOpen) {
           resumeSoon();
           return;
         }
@@ -1289,8 +1198,7 @@ export default function App() {
         return;
       // hide/show-events and hide/show-completed used to have cases here too, mirrored
       // from Header's chrome-nav path — removed along with that mirror (see
-      // HOST_CHROME_NAV_ACTIONS above): applyEventsHidden/applyCompletedHidden already
-      // reach this surface via the settings store broadcast.
+      // hide/show-events|completed: apply via settings store broadcast only.
       case 'open-web': {
         const port = Number(syncInfo?.port) || 0;
         if ((syncInfo?.running ?? syncInfo?.serverRunning) && port > 0) {
@@ -1395,6 +1303,20 @@ export default function App() {
     void window.myCalendar?.setWindowFrameTheme?.(effective === 'dark');
   }, [colorScheme]);
 
+  const shellOpacity = store?.settings?.widget?.opacity ?? DEFAULT_SETTINGS.widget.opacity;
+  useEffect(() => {
+    applyShellOpacity(shellOpacity);
+  }, [shellOpacity, colorScheme]);
+
+  useEffect(() => {
+    const onOpacity = (event) => {
+      const next = event?.detail?.opacity;
+      if (next != null) applyShellOpacity(next);
+    };
+    window.addEventListener('mycalendar:shellOpacity', onOpacity);
+    return () => window.removeEventListener('mycalendar:shellOpacity', onOpacity);
+  }, []);
+
   const accentColor = store?.settings?.viewOptions
     ? getAccentColor(store.settings.viewOptions)
     : (readStoredAccentColor() ?? DEFAULT_VIEW_OPTIONS.accentColor);
@@ -1420,12 +1342,10 @@ export default function App() {
     }
   }, [loading, store]);
 
-  // Login wall: show the login dialog first whenever the app isn't authenticated yet
-  // (fresh install, logged-out relaunch, session expired, etc). DesktopHost never owns
-  // this UI — it only ever mirrors chrome nav, so it must stay untouched here.
+  // Login wall: show the login dialog first whenever the app isn't authenticated yet.
   const autoLoginPromptedRef = useRef(false);
   useEffect(() => {
-    if (autoLoginPromptedRef.current || loading || isLoggedIn || isDesktopSurfaceHost()) {
+    if (autoLoginPromptedRef.current || loading || isLoggedIn) {
       return;
     }
     autoLoginPromptedRef.current = true;
@@ -1605,14 +1525,12 @@ export default function App() {
             onDayQuickEdit={openDayQuickEdit}
             onCreateDate={(date) => openDayQuickEditForDate(date)}
             onEventClick={(event, _clientX, _clientY, dayKey) => {
-              // Window: schedule-bar single-click → quick-edit. DesktopHost ignores click.
+              // Window: schedule-bar single-click → quick-edit. Desktop embed: no-op.
               if (isDesktopSurfaceHost()) return;
               openDayQuickEditForEvent(event, dayKey);
             }}
             onEventHover={(event, clientX, clientY, dayKey, anchorRect) => {
-              // Schedule-bar / 더보기-list hover → read-only detail.
-              // Reachable on DesktopHost too — same in-place overlay as right-click
-              // detail below (no unlock needed; Host already paints overlays).
+              // Schedule-bar / 더보기-list hover → read-only detail (in-place).
               if (!isEventVisibleToViewer(event, calendars, false)) return;
               if (quickEdit || editorOpen) return;
               setActiveEvent(event);
@@ -1620,7 +1538,7 @@ export default function App() {
               setPopoverAnchor(anchorRect ?? { x: clientX, y: clientY });
             }}
             onEventDetail={(event, clientX, clientY, dayKey, anchorRect) => {
-              // Right-click detail (window + DesktopHost without unlock).
+              // Right-click detail (window + desktop embed, in-place).
               if (!isEventVisibleToViewer(event, calendars, false)) return;
               if (quickEdit || editorOpen) return;
               setActiveEvent(event);

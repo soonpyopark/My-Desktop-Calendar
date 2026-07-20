@@ -1,4 +1,4 @@
-import { ensureOnlineOrNotify, urlRequiresInternet } from './offlineNotice.js';
+import { isAppOffline, showOfflineNotice, urlRequiresInternet } from './offlineNotice.js';
 import { isNativeHost, nativeRequest } from './nativeHost.js';
 
 /**
@@ -10,6 +10,10 @@ import { isNativeHost, nativeRequest } from './nativeHost.js';
  *   server host instead of the client.
  * - Public internet URLs are blocked with a shared offline modal when `navigator.onLine` is false.
  *   localhost / private LAN URLs still open offline.
+ *
+ * Never navigate the current calendar tab (`location.assign`) — a failed popup must stay
+ * on the calendar. Also never pre-open `about:blank` with `noopener` (browsers return
+ * null for the handle, leaving a stuck blank tab plus a second real tab).
  */
 export async function openExternalUrl(url) {
   const target = String(url ?? '').trim();
@@ -17,9 +21,11 @@ export async function openExternalUrl(url) {
     return;
   }
 
-  if (urlRequiresInternet(target)) {
-    const ok = await ensureOnlineOrNotify('외부 링크를 열려면 인터넷 연결이 필요합니다.');
-    if (!ok) return;
+  // Offline check is synchronous; only await the dialog when we already know we're offline
+  // so a successful open still runs under the click's user gesture (no popup blocker).
+  if (urlRequiresInternet(target) && isAppOffline()) {
+    await showOfflineNotice('외부 링크를 열려면 인터넷 연결이 필요합니다.');
+    return;
   }
 
   if (isNativeHost()) {
@@ -49,8 +55,5 @@ export async function openExternalUrl(url) {
     /* fall through */
   }
 
-  const opened = window.open(target, '_blank', 'noopener,noreferrer');
-  if (!opened) {
-    window.location.assign(target);
-  }
+  window.open(target, '_blank', 'noopener,noreferrer');
 }

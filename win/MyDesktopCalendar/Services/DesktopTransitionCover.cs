@@ -6,8 +6,10 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using MyDesktopCalendar;
 using MyDesktopCalendar.Native;
 using MediaBrush = System.Windows.Media.Brush;
+using MediaColor = System.Windows.Media.Color;
 
 namespace MyDesktopCalendar.Services;
 
@@ -15,6 +17,8 @@ namespace MyDesktopCalendar.Services;
 /// TOPMOST freeze-frame cover outside the calendar HWND.
 /// Positioned in physical pixels (PerMonitorV2-safe) and filled from
 /// PrintWindow(PW_RENDERFULLCONTENT) so WebView2 content is captured.
+/// WPF DIP footprint is synced via <see cref="WindowFootprint"/> so the
+/// ImageBrush is not letterboxed (black side bars) on scaled DPI.
 /// </summary>
 internal static class DesktopTransitionCover
 {
@@ -28,11 +32,7 @@ internal static class DesktopTransitionCover
     private static DispatcherTimer? _hideTimer;
 
     /// <summary>
-    /// HWND of the currently-shown freeze-frame cover, or Zero when none is up. The cover is
-    /// purely cosmetic and always placed exactly over DesktopHost's own bounds, so
-    /// UndockZoneMonitor's IsCalendarSurfaceExposed hit-test treats it the same as the desktop
-    /// shell itself (WindowFromPoint does not honor WS_EX_TRANSPARENT — see remarks on
-    /// TryShow — so that alone can't make the exposed-check see through it).
+    /// HWND of the currently-shown freeze-frame cover, or Zero when none is up.
     /// </summary>
     public static IntPtr CurrentCoverHwnd { get; private set; }
 
@@ -50,6 +50,13 @@ internal static class DesktopTransitionCover
 
         var w = Math.Max(1, physicalBounds.Width);
         var h = Math.Max(1, physicalBounds.Height);
+        // Minimal pad — larger pads read as the window growing during mode switch.
+        const int pad = 1;
+        var coverBounds = new DesktopEmbedService.Bounds(
+            physicalBounds.X - pad,
+            physicalBounds.Y - pad,
+            w + pad * 2,
+            h + pad * 2);
         var background = TryCaptureWindow(sourceHwnd, w, h)
             ?? TryCaptureScreen(physicalBounds.X, physicalBounds.Y, w, h);
         if (background is null)
@@ -57,6 +64,8 @@ internal static class DesktopTransitionCover
             return false;
         }
 
+        // Opaque page-tint behind the freeze frame — never Transparent (shows as black bars).
+        var pageTint = ResolvePageTintBrush(host);
         _cover = new Window
         {
             Title = string.Empty,
@@ -66,7 +75,7 @@ internal static class DesktopTransitionCover
             ShowActivated = false,
             Topmost = true,
             AllowsTransparency = false,
-            Background = background,
+            Background = pageTint,
             BorderThickness = new Thickness(0),
             Left = 0,
             Top = 0,
@@ -74,6 +83,11 @@ internal static class DesktopTransitionCover
             Height = 16,
             IsHitTestVisible = false,
             Focusable = false,
+            Content = new System.Windows.Controls.Border
+            {
+                Background = background,
+                BorderThickness = new Thickness(0),
+            },
         };
 
         try
@@ -82,29 +96,33 @@ internal static class DesktopTransitionCover
             var helper = new WindowInteropHelper(_cover);
             helper.EnsureHandle();
             var hwnd = helper.Handle;
+
+            // Critical: sync WPF DIP size to the physical cover rect before paint.
+            // SetWindowPos alone left Width/Height at 16 DIP → ImageBrush letterboxed black.
+            WindowFootprint.Sync(_cover, coverBounds);
+            _cover.UpdateLayout();
+
             _ = Win32.SetWindowPos(
                 hwnd,
                 Win32.HWND_TOPMOST,
-                physicalBounds.X,
-                physicalBounds.Y,
-                w,
-                h,
+                coverBounds.X,
+                coverBounds.Y,
+                coverBounds.Width,
+                coverBounds.Height,
                 Win32.SWP_NOACTIVATE | Win32.SWP_SHOWWINDOW);
-            // Click-through (xdiary-style layered overlay): the cover only ever needs to be
-            // *seen*, never clicked. Without WS_EX_TRANSPARENT, UndockZoneMonitor's
-            // IsCalendarSurfaceExposed hit-test (WindowFromPoint) would land on this cover
-            // instead of Progman/WorkerW/DesktopHost while it's up and reject a click landing
-            // during its brief hold as "covered" — turning a purely cosmetic freeze-frame into
-            // a dropped click.
-            //
-            // WS_EX_TRANSPARENT only — no WS_EX_LAYERED. This is a normal DWM-composited WPF
-            // window (AllowsTransparency=false); layering it would require an explicit
-            // UpdateLayeredWindow/SetLayeredWindowAttributes call WPF never makes for its own
-            // D3D-rendered content, which would make the whole cover render blank/invisible.
-            // (WS_EX_TRANSPARENT itself only affects real WM_LBUTTONDOWN routing, not
-            // WindowFromPoint — see CurrentCoverHwnd doc — so it's a courtesy, not the fix.)
+
             var ex = Win32.GetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE).ToInt64();
             Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE, new IntPtr(ex | Win32.WS_EX_TRANSPARENT));
+
+            // Windows 11 draws a 1px accent-color border + rounded corners on every
+            // top-level window by default. That hairline (often near-black) is what
+            // read as "black lines on both sides" flashing in during the mode switch —
+            // the cover never had DWM told to skip it.
+            var none = Win32.DWMWA_COLOR_NONE;
+            _ = Win32.DwmSetWindowAttribute(hwnd, Win32.DWMWA_BORDER_COLOR, ref none, sizeof(int));
+            var noRound = Win32.DWMWCP_DONOTROUND;
+            _ = Win32.DwmSetWindowAttribute(hwnd, Win32.DWMWA_WINDOW_CORNER_PREFERENCE, ref noRound, sizeof(int));
+
             _cover.Dispatcher.Invoke(DispatcherPriority.Render, static () => { });
             CurrentCoverHwnd = hwnd;
             return true;
@@ -114,6 +132,26 @@ internal static class DesktopTransitionCover
             HideImmediate();
             return false;
         }
+    }
+
+    private static MediaBrush ResolvePageTintBrush(Window? host)
+    {
+        try
+        {
+            if (host?.Background is SolidColorBrush solid
+                && solid.Color.A > 0
+                && (solid.Color.R > 8 || solid.Color.G > 8 || solid.Color.B > 8))
+            {
+                return solid.Clone();
+            }
+        }
+        catch
+        {
+            /* ignore */
+        }
+
+        // Light calendar page — matches default theme; avoids black gutters.
+        return new SolidColorBrush(MediaColor.FromRgb(0xEE, 0xF0, 0xF2));
     }
 
     /// <summary>Legacy entry — only places a cover when a real capture succeeds.</summary>

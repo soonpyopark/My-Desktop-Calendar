@@ -10,22 +10,23 @@
         WindowStartupLocation="CenterScreen"
         WindowStyle="None"
         ResizeMode="CanResize"
-        Background="#202124"
+        Background="#EEF0F2"
         BorderThickness="0"
         ShowInTaskbar="False"
         UseLayoutRounding="True"
         SnapsToDevicePixels="True">
-  <Grid>
-    <wv2:WebView2 x:Name="WebView" DefaultBackgroundColor="#FF202124" />
+  <Grid Background="#EEF0F2">
+    <!-- Opaque page tint — Transparent clear showed black gaps and white flashes. -->
+    <wv2:WebView2 x:Name="WebView" DefaultBackgroundColor="#FFEEF0F2" />
     <!-- While resizing: solid cover over a size-pinned WebView (layout deferred until mouse-up). -->
     <Border x:Name="ResizeGhost"
-            Background="#202124"
+            Background="#EEF0F2"
             Visibility="Collapsed"
             IsHitTestVisible="False"
             Panel.ZIndex="5" />
-    <!-- Matches React loading splash: AppIcon + 「캘린더 불러오는 중…」 -->
+    <!-- Brief boot splash only (not the wallpaper surface clear color). -->
     <Border x:Name="BootSplash"
-            Background="#202124"
+            Background="#EEF0F2"
             Panel.ZIndex="10">
       <StackPanel VerticalAlignment="Center"
                   HorizontalAlignment="Center">
@@ -39,7 +40,7 @@
         <TextBlock Margin="0,12,0,0"
                    FontSize="14"
                    FontFamily="Segoe UI, Malgun Gothic"
-                   Foreground="#BDC1C6"
+                   Foreground="#3C4043"
                    HorizontalAlignment="Center"
                    Text="캘린더 불러오는 중…" />
       </StackPanel>

@@ -36,6 +36,7 @@ internal static class Win32
 
     public const int SW_HIDE = 0;
     public const int SW_SHOW = 5;
+    public const int SW_SHOWNOACTIVATE = 4;
     public const int SW_RESTORE = 9;
     public const int SW_MAXIMIZE = 3;
     public const int SW_MINIMIZE = 6;
@@ -59,6 +60,10 @@ internal static class Win32
     public const int DWMWA_TRANSITIONS_FORCEDISABLED = 3;
     public const int DWMWA_BORDER_COLOR = 34;
     public const int DWMWA_CAPTION_COLOR = 35;
+    public const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+    public const int DWMWCP_DONOTROUND = 1;
+    /// <summary>Sentinel for DWMWA_BORDER_COLOR/CAPTION_COLOR: suppress the drawn border entirely.</summary>
+    public const int DWMWA_COLOR_NONE = unchecked((int)0xFFFFFFFE);
 
     /// <summary>
     /// Cloaks/uncloaks a window from DWM composition without hiding/showing it.
@@ -144,6 +149,9 @@ internal static class Win32
 
     [DllImport("user32.dll")]
     public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool AdjustWindowRectEx(ref RECT lpRect, int dwStyle, bool bMenu, int dwExStyle);
 
     [DllImport("user32.dll")]
     public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);

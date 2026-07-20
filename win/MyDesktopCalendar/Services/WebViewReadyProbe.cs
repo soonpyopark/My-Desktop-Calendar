@@ -3,13 +3,9 @@ using Microsoft.Web.WebView2.Core;
 namespace MyDesktopCalendar.Services;
 
 /// <summary>
-/// Shared "has React actually painted the calendar UI yet" check, reused by the App
-/// WebView boot splash (<see cref="MyDesktopCalendar.MainWindow"/>) and the desktop-embed
-/// Host WebView (<see cref="DesktopHostWindow"/>). The Host previously assumed a fixed
-/// ~120ms delay was enough before the first wallpaper embed — on a cold WebView2 profile
-/// (first launch, no disk/cache warmup) that is often not enough, so the freeze-frame
-/// cover ends up capturing/revealing a still-loading (blank/splash) surface, which shows
-/// up as a startup flicker/pop-in. Polling this probe instead waits for a real signal.
+/// "Has React painted the calendar UI yet" probe for <see cref="MainWindow"/> boot.
+/// Used so freeze-frame covers wait for a real UI signal instead of a fixed delay
+/// (cold WebView2 profiles often need longer than ~120ms).
 /// </summary>
 internal static class WebViewReadyProbe
 {

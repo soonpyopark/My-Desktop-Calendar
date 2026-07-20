@@ -54,9 +54,8 @@ public partial class App : System.Windows.Application
             LogError(args.ExceptionObject as Exception);
         };
 
-        // Opaque dark clear color (transparent + dark CSS often paints as a blank black surface).
-        // Format: 0xAARRGGBB
-        Environment.SetEnvironmentVariable("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", "0xFF202124");
+        // Opaque light page tint (0xAARRGGBB). Transparent clear painted black gaps / white flashes.
+        Environment.SetEnvironmentVariable("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", "0xFFEEF0F2");
 
         base.OnStartup(e);
     }

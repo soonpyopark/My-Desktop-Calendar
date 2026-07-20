@@ -85,9 +85,9 @@ export const DEFAULT_VIEW_OPTIONS = {
    */
   accentColor: CALENDAR_COLOR_PALETTE[0],
   runAtStartup: true,
-  /** Hide event bars and day background colors (eye toolbar) — synced App ↔ web. */
+  /** Hide event bars and day background colors (eye toolbar) — per surface (native vs browser). */
   eventsHidden: false,
-  /** Hide completed events only (checkbox toolbar) — synced App ↔ web. */
+  /** Hide completed events only (checkbox toolbar) — per surface (native vs browser). */
   completedHidden: false,
 };
 

@@ -33,7 +33,6 @@ internal sealed class NativeBridge
     private readonly EventAttachmentService _attachments;
     private DesktopSurfaceController? _surfaces;
     private WebView2? _webView;
-    private WebView2? _secondaryWebView;
     private string? _currentToken;
     private string? _currentUsername;
     private bool _currentRemember;
@@ -98,14 +97,6 @@ internal sealed class NativeBridge
         _embed.RefreshContentAlpha();
     }
 
-    /// <summary>DesktopHost WebView — shares store events; keeps zones in sync while host is visible.</summary>
-    public void AttachSecondary(WebView2 webView)
-    {
-        DetachSecondary();
-        _secondaryWebView = webView;
-        webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
-    }
-
     public void DetachPrimary()
     {
         try
@@ -125,84 +116,14 @@ internal sealed class NativeBridge
         }
     }
 
-    public void DetachSecondary()
-    {
-        try
-        {
-            if (WebView2Safe.TryGetCore(_secondaryWebView) is { } core)
-            {
-                core.WebMessageReceived -= OnWebMessageReceived;
-            }
-        }
-        catch
-        {
-            /* disposed */
-        }
-        finally
-        {
-            _secondaryWebView = null;
-        }
-    }
-
     public void NotifyWidgetStatus()
     {
         var status = BuildWidgetStatus();
-        var payload = new JsonObject
+        PostEvent(new JsonObject
         {
             ["type"] = "widget-status",
             ["status"] = status.DeepClone(),
-        };
-
-        // Chrome nav must reach DesktopHost while embedded; while in window mode the App
-        // already applied the click — only mirror to the host surface.
-        var pending = _surfaceState.Pending;
-        if (pending.Kind == PendingActionKind.Ui && IsChromeNavUiAction(pending.UiAction))
-        {
-            if (_embed.IsEmbedded)
-            {
-                // SysListView32/WS_POPUP embed: the real click already reached whichever
-                // surface's own React onClick raised this (see pending.UiActionSurface) —
-                // it ran fn() locally there already. Echoing this push back to that same
-                // surface re-applies the nav a second time (prev/next silently skipping a
-                // month/week). Legacy Progman/WorkerW (WS_CHILD) embeds still need the full
-                // broadcast — DefView swallows the real click before DesktopHost's DOM
-                // ever sees it there, so the push is the only way the action reaches it.
-                if (_embed.IsPopupStyleEmbed && pending.UiActionSurface == "desktop")
-                {
-                    PostEventToAppOnly(payload);
-                }
-                else if (_embed.IsPopupStyleEmbed && pending.UiActionSurface == "app")
-                {
-                    PostEventToDesktopHostOnly(payload);
-                }
-                else
-                {
-                    PostEvent(payload, broadcastToDesktopHost: true);
-                }
-            }
-            else
-            {
-                PostEventToDesktopHostOnly(payload);
-            }
-
-            return;
-        }
-
-        // Settings/search/auth/export — App only (search uses permanent window unlock;
-        // settings/auth/export temporarily unlock and resume desktop on close).
-        PostEvent(payload, broadcastToDesktopHost: false);
-    }
-
-    private void PostEventToDesktopHostOnly(JsonObject payload)
-    {
-        payload["type"] ??= "event";
-        WebView2Safe.TryPostJson(_secondaryWebView, payload.ToJsonString(JsonUtil.Compact));
-    }
-
-    private void PostEventToAppOnly(JsonObject payload)
-    {
-        payload["type"] ??= "event";
-        WebView2Safe.TryPostJson(_webView, payload.ToJsonString(JsonUtil.Compact));
+        });
     }
 
     /// <summary>
@@ -225,7 +146,7 @@ internal sealed class NativeBridge
         action is "hide-events" or "show-events" or "hide-completed" or "show-completed";
 
 
-    /// <summary>Temporary unlock for embedded day double-click → create editor.</summary>
+    /// <summary>Queue in-place create editor (single surface — no unlock).</summary>
     public void SuspendForCreate(string dateKey)
     {
         if (string.IsNullOrWhiteSpace(dateKey))
@@ -233,44 +154,14 @@ internal sealed class NativeBridge
             return;
         }
 
-        _ = _window.Dispatcher.InvokeAsync(async () =>
+        _ = _window.Dispatcher.InvokeAsync(() =>
         {
-            var normalized = dateKey.Trim();
-
-            // Already temporarily unlocked (editor just closed, or still open) — refresh pending.
-            if (_surfaceState.Suspended)
-            {
-                _surfaceState.UpdatePending(PendingAction.Create(normalized));
-                NotifyWidgetStatus();
-                return;
-            }
-
-            if (!_embed.IsEmbedded && !_embed.IsShellParented)
-            {
-                return;
-            }
-
-            // Claim before surface switch so a second caller (Host React + zone) cannot
-            // run SuspendDesktopForUi twice (desktop-wide flash).
-            _surfaceState.Suspend(PendingAction.Create(normalized));
-
-            if (_surfaces is not null)
-            {
-                await _surfaces.SuspendDesktopForUiAsync();
-            }
-
-            if (!_window.IsVisible)
-            {
-                _window.Show();
-            }
-
-            _window.WindowState = WindowState.Normal;
-            _window.Activate();
+            _surfaceState.UpdatePending(PendingAction.Create(dateKey.Trim()));
             NotifyWidgetStatus();
         });
     }
 
-    /// <summary>Temporary unlock for embedded event-bar double-click → edit editor.</summary>
+    /// <summary>Queue in-place edit editor (single surface — no unlock).</summary>
     public void SuspendForEdit(string eventId, string dayKey)
     {
         if (string.IsNullOrWhiteSpace(eventId) || string.IsNullOrWhiteSpace(dayKey))
@@ -278,131 +169,32 @@ internal sealed class NativeBridge
             return;
         }
 
-        _ = _window.Dispatcher.InvokeAsync(async () =>
+        _ = _window.Dispatcher.InvokeAsync(() =>
         {
-            var normalizedEventId = eventId.Trim();
-            var normalizedDayKey = dayKey.Trim();
-
-            if (_surfaceState.Suspended)
-            {
-                _surfaceState.UpdatePending(PendingAction.Edit(normalizedEventId, normalizedDayKey));
-                NotifyWidgetStatus();
-                return;
-            }
-
-            if (!_embed.IsEmbedded && !_embed.IsShellParented)
-            {
-                return;
-            }
-
-            _surfaceState.Suspend(PendingAction.Edit(normalizedEventId, normalizedDayKey));
-
-            if (_surfaces is not null)
-            {
-                await _surfaces.SuspendDesktopForUiAsync();
-            }
-
-            if (!_window.IsVisible)
-            {
-                _window.Show();
-            }
-
-            _window.WindowState = WindowState.Normal;
-            _window.Activate();
+            _surfaceState.UpdatePending(PendingAction.Edit(eventId.Trim(), dayKey.Trim()));
             NotifyWidgetStatus();
         });
     }
 
-    /// <summary>Temporary unlock for embedded header button clicks.</summary>
-    /// <param name="originSurface">"desktop" or "app" — which WebView2 raised this
-    /// (see PendingAction.UiActionSurface); null for calls with no browser-side origin
-    /// (e.g. the legacy zone-monitor poll, which always targets DesktopHost).</param>
+    /// <summary>In-place UI action signal (single surface — no Host/App unlock).</summary>
+    /// <param name="originSurface">Kept for API compat; ignored.</param>
     public void SuspendForUi(string action, string? originSurface = null)
     {
         var normalized = NormalizeUiAction(action);
-        if (normalized is null)
+        if (normalized is null || IsStoreSyncedUiAction(normalized))
         {
             return;
         }
 
-        // Store-synced toggles are applied only by the surface that received the real
-        // click (Header onClick → updateSettings). Never queue them as pendingUiAction.
-        if (IsStoreSyncedUiAction(normalized))
+        _ = _window.Dispatcher.InvokeAsync(() =>
         {
-            return;
-        }
-
-        _ = _window.Dispatcher.InvokeAsync(async () =>
-        {
-            void SignalUi(string normalizedAction, bool stayEmbedded)
-            {
-                _surfaceState.UpdatePending(PendingAction.Ui(normalizedAction, originSurface));
-                NotifyWidgetStatus();
-                // Chrome nav: clear after push so App poll does not double-apply when
-                // the click handler already ran onClick (window mode).
-                if (stayEmbedded && IsChromeNavUiAction(normalizedAction))
-                {
-                    _surfaceState.ClearPending();
-                }
-            }
-
-            if (!_embed.IsEmbedded && !_embed.IsShellParented)
-            {
-                // Window mode — App onClick applies locally; Notify mirrors nav to DesktopHost.
-                SignalUi(normalized, stayEmbedded: true);
-                return;
-            }
-
-            // Already showing App (window mode / host hidden) — never re-run surface switch.
-            // Shell-parented-but-hidden used to fall through into UnlockToWindowModeForUi and flash.
-            if (!_embed.IsEmbedded)
-            {
-                SignalUi(normalized, stayEmbedded: IsChromeNavUiAction(normalized));
-                return;
-            }
-
-            // Search while wallpaper-embedded: permanent window unlock (stays in window
-            // mode after close). Settings falls through to the temporary-unlock path below
-            // so closing it resumes desktop embed automatically.
-            if (normalized is "search")
-            {
-                await UnlockToWindowModeForUiAsync(normalized, originSurface);
-                return;
-            }
-
-            // Month/year navigation can run while staying embedded — unlocking first
-            // made the first click feel like a no-op (unlock only, action on 2nd click).
-            if (!UiActionRequiresUnlock(normalized))
-            {
-                SignalUi(normalized, stayEmbedded: true);
-                return;
-            }
-
-            // Same path as SuspendForCreate / day quick-edit.
-            // Claim suspend before surface switch — zone + Host onClick used to
-            // double SuspendDesktopForUi and flash the whole desktop.
-            if (_surfaceState.Suspended)
-            {
-                _surfaceState.UpdatePending(PendingAction.Ui(normalized, originSurface));
-                NotifyWidgetStatus();
-                return;
-            }
-
-            _surfaceState.Suspend(PendingAction.Ui(normalized, originSurface));
-
-            if (_surfaces is not null)
-            {
-                await _surfaces.SuspendDesktopForUiAsync();
-            }
-
-            if (!_window.IsVisible)
-            {
-                _window.Show();
-            }
-
-            _window.WindowState = WindowState.Normal;
-            _window.Activate();
+            // All UI actions (including search) stay in-place on the single surface.
+            _surfaceState.UpdatePending(PendingAction.Ui(normalized, originSurface));
             NotifyWidgetStatus();
+            if (IsChromeNavUiAction(normalized))
+            {
+                _surfaceState.ClearPending();
+            }
         });
     }
 
@@ -464,49 +256,8 @@ internal sealed class NativeBridge
         return true;
     }
 
-    /// <summary>
-    /// Permanent window mode for UI that should leave desktop (e.g. search).
-    /// Rematerializes App WebView and disposes DesktopHost (single-process window mode).
-    /// </summary>
-    private async Task UnlockToWindowModeForUiAsync(string pendingAction, string? originSurface = null)
-    {
-        // Keep Activate from ApplyFrameTheme during Show (same guard as temp unlock).
-        // Do not ClearSuspendState() first — that wiped pending and dropped the guard,
-        // so Settings opened after the cover and flashed the desktop.
-        _surfaceState.Suspend(PendingAction.Ui(pendingAction, originSurface));
-
-        // Start App overlay mount while Host is still visible.
-        NotifyWidgetStatus();
-
-        if (_surfaces is not null)
-        {
-            await _surfaces.EnterWindowModeAsync(bringToFront: true);
-        }
-
-        // Permanent window — no resume. Clear suspend flag only; keep pending until ack.
-        _surfaceState.MarkResumed();
-
-        PersistLaunchMode("window");
-        NotifyWidgetStatus();
-    }
-
-    /// <summary>
-    /// Actions that temporary-unlock to App (same SuspendDesktopForUi as day quick-edit)
-    /// and resume desktop embed automatically once the App-side UI closes. Search uses
-    /// UnlockToWindowModeForUi instead (permanent — no resume on close).
-    /// </summary>
-    private static bool UiActionRequiresUnlock(string action) =>
-        action is "auth" or "export-excel" or "export-pdf" or "settings";
-
-    /// <summary>
-    /// Native dialog owner (file picker, MessageBox) — whichever WPF window is actually
-    /// the visible/interactive surface right now. Under SysListView32/WS_POPUP embed,
-    /// attachments are added in place on DesktopHost (Header.jsx opens the day/event
-    /// editor there directly, same as Settings) while App stays cloaked, so a dialog
-    /// owned by the cloaked App window would have no visible owner to anchor to.
-    /// </summary>
-    private Window ResolvePickerOwner() =>
-        _surfaces?.IsDesktopSurfaceActive == true && _surfaces.Host is Window host ? host : _window;
+    /// <summary>Native dialog owner — single MainWindow surface.</summary>
+    private Window ResolvePickerOwner() => _window;
 
     private static string? NormalizeUiAction(string? action)
     {
@@ -608,8 +359,8 @@ internal sealed class NativeBridge
             PostEvent(new JsonObject
             {
                 ["type"] = "store-updated",
-                // Apply the same guest visibility filter as GET /api/store.
-                ["store"] = FilterStore(_store.ReadStore(), _currentToken),
+                // Apply the same guest visibility filter as GET /api/store (native surface).
+                ["store"] = FilterStore(_store.ReadStore(), _currentToken, fromNativeShell: true),
                 ["updatedAt"] = updatedAt,
             });
         });
@@ -832,6 +583,12 @@ internal sealed class NativeBridge
             token = _currentToken;
         }
 
+        // Desktop shell chrome / embed / shutdown must never be driven by LAN browser tabs.
+        if (!fromNativeShell && IsShellOnlyApi(path))
+        {
+            throw new UnauthorizedAccessException("이 API는 바탕화면 앱에서만 사용할 수 있습니다.");
+        }
+
         if (path == "/api/health" && method == "GET")
         {
             return new JsonObject
@@ -868,26 +625,22 @@ internal sealed class NativeBridge
 
         if (path == "/api/auth/session" && method == "GET")
         {
-            // Valid client token: bind shell session so DesktopHost can sync (dual WebView storage).
+            // Browser and native each keep their own session. HTTP must never BindShellSession
+            // or pull the shell token — that made browser login/logout take over the desktop UI.
             if (!string.IsNullOrEmpty(token) && _auth.IsValid(token))
             {
-                BindShellSession(token, username: null, remember: null, notify: true);
-                // Native WebViews may request the token to mirror into the other profile.
-                return BuildAuthPayload(includeToken: fromNativeShell);
+                if (fromNativeShell)
+                {
+                    BindShellSession(token, username: null, remember: null, notify: true);
+                    return BuildAuthPayload(includeToken: true);
+                }
+
+                return BuildAuthPayloadForToken(token, includeToken: false);
             }
 
-            // Dual WebView: App logged in while Host was not ready — Host pulls shell session.
-            // HTTP browser clients must never receive the shell token this way.
             if (fromNativeShell && _auth.IsValid(_currentToken))
             {
-                // This surface's own earlier GET /api/store (fired on mount, in parallel with
-                // this session check) ran before it had a token, so FilterStore returned it the
-                // guest/empty-events branch — most visible after a PC reboot with a persistent
-                // login, where the App profile's WebView2 storage already has a token but this
-                // Host profile's storage does not yet. BindShellSession's own broadcast above
-                // only fires when the bound token *changes*; since App already bound this same
-                // token earlier, that branch is a no-op here, so nothing else will ever re-push
-                // a correctly-filtered store to this surface. Resync explicitly.
+                // Cold WebView may check session before localStorage is restored — re-push store.
                 BroadcastFilteredStore();
                 return BuildAuthPayload(includeToken: true);
             }
@@ -913,15 +666,31 @@ internal sealed class NativeBridge
                 throw new InvalidOperationException("아이디 또는 비밀번호가 올바르지 않습니다.");
             }
 
-            var session = _auth.CreateSession(persistent, identity);
-            BindShellSession(session, username: identity.LoginId, remember: persistent, notify: true);
-            return BuildAuthPayload(includeToken: true);
+            var sessionToken = _auth.CreateSession(persistent, identity);
+            if (fromNativeShell)
+            {
+                BindShellSession(sessionToken, username: identity.LoginId, remember: persistent, notify: true);
+                return BuildAuthPayload(includeToken: true);
+            }
+
+            // Browser: new token only for this client — do not rebind or notify the shell.
+            return BuildAuthPayloadForToken(sessionToken, includeToken: true, remember: persistent);
         }
 
         if (path == "/api/auth/logout" && method == "POST")
         {
-            _auth.Revoke(token ?? _currentToken);
-            ClearShellSession(notify: true);
+            if (fromNativeShell)
+            {
+                var revoke = string.IsNullOrEmpty(token) ? _currentToken : token;
+                _auth.Revoke(revoke);
+                ClearShellSession(notify: true);
+            }
+            else if (!string.IsNullOrEmpty(token))
+            {
+                // Browser logout revokes only that tab's token — never the desktop shell session.
+                _auth.Revoke(token);
+            }
+
             return new JsonObject { ["ok"] = true };
         }
 
@@ -957,7 +726,7 @@ internal sealed class NativeBridge
 
         if (path == "/api/store" && method == "GET")
         {
-            return FilterStore(_store.ReadStore(), token);
+            return FilterStore(_store.ReadStore(), token, fromNativeShell);
         }
 
         if (path == "/api/events" && method == "POST")
@@ -1076,11 +845,14 @@ internal sealed class NativeBridge
             var existing = _store.FindCalendar(id)
                 ?? throw new InvalidOperationException("캘린더를 찾을 수 없습니다.");
 
-            // Eye-toggle is per-member (settings.hiddenCalendarIdsByLoginId), not shared calendar.visible.
+            // Eye-toggle is per-member + per-surface (native vs browser), not shared calendar.visible.
+            var clientSurface = fromNativeShell
+                ? CalendarStoreService.SurfaceNative
+                : CalendarStoreService.SurfaceBrowser;
             if (body.ContainsKey("visible"))
             {
                 var wantVisible = body["visible"]?.GetValue<bool>() != false;
-                _store.SetCalendarHiddenForLogin(session.LoginId, id, hidden: !wantVisible);
+                _store.SetCalendarHiddenForLogin(session.LoginId, id, hidden: !wantVisible, clientSurface);
                 body.Remove("visible");
             }
 
@@ -1103,7 +875,7 @@ internal sealed class NativeBridge
                 ["settings"] = _store.ReadStore()["settings"]?.DeepClone(),
                 ["calendars"] = new JsonArray { (JsonObject)result.DeepClone() },
             };
-            CalendarStoreService.ProjectCalendarVisibilityForClient(probe, session.LoginId);
+            CalendarStoreService.ProjectCalendarVisibilityForClient(probe, session.LoginId, clientSurface);
             if (probe["calendars"] is JsonArray arr && arr[0] is JsonObject projected)
             {
                 return projected;
@@ -1125,7 +897,7 @@ internal sealed class NativeBridge
             var events = body["events"] as JsonArray
                 ?? throw new InvalidOperationException("가져올 일정이 없습니다.");
             var result = _store.ImportEventsIntoCalendar(id, events, session.LoginId);
-            result["store"] = FilterStore(_store.ReadStore(), token);
+            result["store"] = FilterStore(_store.ReadStore(), token, fromNativeShell);
             return result;
         }
 
@@ -1182,8 +954,26 @@ internal sealed class NativeBridge
                 throw new UnauthorizedAccessException("총괄관리자만 변경할 수 있는 설정입니다.");
             }
 
-            var result = _store.PatchSettings(body, session.LoginId);
-            ApplyShellSettings(result);
+            var clientSurface = fromNativeShell
+                ? CalendarStoreService.SurfaceNative
+                : CalendarStoreService.SurfaceBrowser;
+
+            // Browser must not move/resize/opacity the WPF shell or change startup registration.
+            if (!fromNativeShell)
+            {
+                body.Remove("widget");
+                if (body["viewOptions"] is JsonObject vo)
+                {
+                    vo.Remove("runAtStartup");
+                }
+            }
+
+            var result = _store.PatchSettings(body, session.LoginId, clientSurface);
+            if (fromNativeShell)
+            {
+                ApplyShellSettings(result);
+            }
+
             return result;
         }
 
@@ -1538,7 +1328,10 @@ internal sealed class NativeBridge
         var hwnd = new WindowInteropHelper(_window).Handle;
         WindowFrameTheme.Apply(hwnd, dark);
 
-        var page = dark ? WindowFrameTheme.PageDark : WindowFrameTheme.PageLight;
+        // Match CSS page fills so unpainted/composition frames never flash black or white.
+        var page = dark
+            ? System.Windows.Media.Color.FromRgb(0x20, 0x21, 0x24)
+            : System.Windows.Media.Color.FromRgb(0xEE, 0xF0, 0xF2);
         _window.Background = new System.Windows.Media.SolidColorBrush(page);
         if (hwnd != IntPtr.Zero)
         {
@@ -1554,8 +1347,7 @@ internal sealed class NativeBridge
             _webView.DefaultBackgroundColor = System.Drawing.Color.FromArgb(255, page.R, page.G, page.B);
         }
 
-        // Never RefreshContentAlpha here — that HWND is DesktopHost. Rewriting DWM on the
-        // wallpaper surface flashes DefView (also when Chrome web UI POSTs frame-theme).
+        // Never RefreshContentAlpha here — rewriting DWM on the wallpaper surface flashes DefView.
         WindowFrameTheme.Reapply();
     }
 
@@ -1563,7 +1355,11 @@ internal sealed class NativeBridge
     {
         try
         {
-            var scheme = _store.ReadStore()["settings"]?["viewOptions"]?["colorScheme"]?.GetValue<string>()
+            var settings = _store.ReadStore()["settings"] as JsonObject;
+            // Theme is per-surface; the WPF frame follows the native (shell) preference.
+            var scheme = settings?["viewOptionsBySurface"]?[CalendarStoreService.SurfaceNative]?["colorScheme"]
+                    ?.GetValue<string>()
+                ?? settings?["viewOptions"]?["colorScheme"]?.GetValue<string>()
                 ?? "light";
             if (string.Equals(scheme, "dark", StringComparison.OrdinalIgnoreCase))
             {
@@ -1646,6 +1442,24 @@ internal sealed class NativeBridge
             var opacity = ReadWidgetOpacity(settings);
             _embed.SetOpacity(opacity);
             ApplyMainWindowOpacity(opacity);
+            // Push fill-alpha to the WebView (true wallpaper see-through).
+            NotifyShellOpacity(opacity);
+        }
+        catch
+        {
+            /* ignore */
+        }
+    }
+
+    private void NotifyShellOpacity(double opacity)
+    {
+        try
+        {
+            PostEvent(new JsonObject
+            {
+                ["type"] = "shell-opacity",
+                ["opacity"] = DesktopEmbedService.NormalizeOpacity(opacity),
+            });
         }
         catch
         {
@@ -1687,21 +1501,18 @@ internal sealed class NativeBridge
     }
 
     /// <summary>
-    /// Main (App) window opacity: WPF <see cref="Window.Opacity"/> + top-level LWA_ALPHA
-    /// (covers WebView2 child HWNDs when the App window is top-level).
+    /// Keep WPF Opacity at 1 — translucency is owned by <see cref="DesktopEmbedService.SetOpacity"/>.
     /// </summary>
     private void ApplyMainWindowOpacity(double opacity)
     {
         try
         {
-            var clamped = DesktopEmbedService.NormalizeOpacity(opacity);
-            var alpha = (byte)Math.Clamp((int)Math.Round(clamped * 255.0), 13, 255);
-
+            _ = opacity;
             void ApplyWpf()
             {
                 try
                 {
-                    _window.Opacity = clamped;
+                    _window.Opacity = 1.0;
                 }
                 catch
                 {
@@ -1717,20 +1528,6 @@ internal sealed class NativeBridge
             {
                 _ = _window.Dispatcher.BeginInvoke(ApplyWpf);
             }
-
-            var hwnd = new WindowInteropHelper(_window).Handle;
-            if (hwnd == IntPtr.Zero || !Win32.IsWindow(hwnd))
-            {
-                return;
-            }
-
-            var ex = Win32.GetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE).ToInt64();
-            if ((ex & Win32.WS_EX_LAYERED) == 0)
-            {
-                Win32.SetWindowLongPtrCompat(hwnd, Win32.GWL_EXSTYLE, new IntPtr(ex | Win32.WS_EX_LAYERED));
-            }
-
-            _ = Win32.SetLayeredWindowAttributes(hwnd, 0, alpha, Win32.LWA_ALPHA);
         }
         catch
         {
@@ -1931,8 +1728,11 @@ internal sealed class NativeBridge
         }
     }
 
-    private JsonObject FilterStore(JsonObject store, string? token)
+    private JsonObject FilterStore(JsonObject store, string? token, bool fromNativeShell)
     {
+        var clientSurface = fromNativeShell
+            ? CalendarStoreService.SurfaceNative
+            : CalendarStoreService.SurfaceBrowser;
         var session = _auth.GetSession(token);
         if (session is null)
         {
@@ -1950,6 +1750,7 @@ internal sealed class NativeBridge
 
                 guestSettings["allowedIpCidrs"] = new JsonArray();
                 CalendarStoreService.ProjectSettingsDayColorsForClient(guestSettings, loginId: null);
+                CalendarStoreService.ProjectViewOptionsForClient(guestSettings, clientSurface);
             }
 
             return empty;
@@ -2027,15 +1828,24 @@ internal sealed class NativeBridge
         if (clone["settings"] is JsonObject settings)
         {
             CalendarStoreService.ProjectSettingsDayColorsForClient(settings, session.LoginId);
+            CalendarStoreService.ProjectViewOptionsForClient(settings, clientSurface);
         }
 
-        CalendarStoreService.ProjectCalendarVisibilityForClient(clone, session.LoginId);
+        CalendarStoreService.ProjectCalendarVisibilityForClient(clone, session.LoginId, clientSurface);
         return clone;
+    }
+
+    private static bool IsShellOnlyApi(string path)
+    {
+        if (path.StartsWith("/api/window/", StringComparison.Ordinal)) return true;
+        if (path.StartsWith("/api/desktop/", StringComparison.Ordinal)) return true;
+        if (string.Equals(path, "/api/app/shutdown", StringComparison.Ordinal)) return true;
+        return false;
     }
 
     private void Reply(CoreWebView2? target, string? id, bool ok, JsonNode? result, string? error)
     {
-        var core = target ?? WebView2Safe.TryGetCore(_webView) ?? WebView2Safe.TryGetCore(_secondaryWebView);
+        var core = target ?? WebView2Safe.TryGetCore(_webView);
         if (core is null || string.IsNullOrEmpty(id))
         {
             return;
@@ -2100,32 +1910,37 @@ internal sealed class NativeBridge
         }
     }
 
-    private JsonObject BuildAuthPayload(bool includeToken)
+    private JsonObject BuildAuthPayload(bool includeToken) =>
+        BuildAuthPayloadForToken(_currentToken, includeToken, remember: _currentRemember);
+
+    /// <summary>Auth payload for an arbitrary token (browser clients; does not read shell bind).</summary>
+    private JsonObject BuildAuthPayloadForToken(string? token, bool includeToken, bool? remember = null)
     {
-        var session = _auth.GetSession(_currentToken);
+        var session = _auth.GetSession(token);
         var ok = session is not null;
+        var rememberFlag = remember ?? (ok && _auth.IsPersistent(token));
         var payload = new JsonObject
         {
             ["authenticated"] = ok,
             ["admin"] = ok && session!.IsSuperAdmin,
-            ["username"] = ok ? (session!.LoginId) : null,
+            ["username"] = ok ? session!.LoginId : null,
             ["loginId"] = ok ? session!.LoginId : null,
             ["role"] = ok ? session!.Role : null,
             ["isSuperAdmin"] = ok && session!.IsSuperAdmin,
-            ["remember"] = ok && _currentRemember,
+            ["remember"] = ok && rememberFlag,
         };
         if (includeToken && ok)
         {
-            payload["token"] = _currentToken;
+            payload["token"] = token;
         }
 
         return payload;
     }
 
-    /// <summary>Push shell auth to App + DesktopHost (separate WebView2 profiles).</summary>
+    /// <summary>Push shell auth into the native WebView.</summary>
     public void NotifyAuthChangedFromShell() => NotifyAuthChanged();
 
-    /// <summary>Tray Start/Stop Server — refresh "브라우저에서 편집" enablement in both WebViews.</summary>
+    /// <summary>Tray Start/Stop Server — refresh "브라우저에서 편집" enablement in the WebView.</summary>
     public void NotifyServerModeChanged()
     {
         try
@@ -2159,7 +1974,7 @@ internal sealed class NativeBridge
             PostEvent(new JsonObject
             {
                 ["type"] = "store-updated",
-                ["store"] = FilterStore(_store.ReadStore(), _currentToken),
+                ["store"] = FilterStore(_store.ReadStore(), _currentToken, fromNativeShell: true),
                 ["updatedAt"] = DateTime.UtcNow.ToString("o"),
             });
         }
@@ -2171,61 +1986,15 @@ internal sealed class NativeBridge
 
     private void PostEvent(JsonObject payload, bool broadcastToDesktopHost = true)
     {
+        _ = broadcastToDesktopHost;
         payload["type"] ??= "event";
-        var json = payload.ToJsonString(JsonUtil.Compact);
-        WebView2Safe.TryPostJson(_webView, json);
-
-        if (!broadcastToDesktopHost)
-        {
-            return;
-        }
-
-        WebView2Safe.TryPostJson(_secondaryWebView, json);
+        WebView2Safe.TryPostJson(_webView, payload.ToJsonString(JsonUtil.Compact));
     }
 
-    /// <summary>Forward view-nav to the other surface only (avoid echo loops).</summary>
-    private void RelayViewNav(JsonObject msg, CoreWebView2? from)
+    /// <summary>No-op — single surface has no peer to relay view-nav to.</summary>
+    private static void RelayViewNav(JsonObject msg, CoreWebView2? from)
     {
-        var viewDate = msg["viewDate"]?.GetValue<string>();
-        var selectedDate = msg["selectedDate"]?.GetValue<string>();
-        if (string.IsNullOrWhiteSpace(viewDate) || string.IsNullOrWhiteSpace(selectedDate))
-        {
-            return;
-        }
-
-        var mode = msg["viewMode"]?.GetValue<string>() ?? "month";
-        if (mode is not ("month" or "week" or "year"))
-        {
-            mode = "month";
-        }
-
-        var payload = new JsonObject
-        {
-            ["type"] = "view-nav",
-            ["viewMode"] = mode,
-            ["viewDate"] = viewDate,
-            ["selectedDate"] = selectedDate,
-        };
-        var json = payload.ToJsonString(JsonUtil.Compact);
-
-        void TryPost(CoreWebView2? core)
-        {
-            if (core is null || ReferenceEquals(core, from))
-            {
-                return;
-            }
-
-            try
-            {
-                core.PostWebMessageAsJson(json);
-            }
-            catch
-            {
-                /* ignore */
-            }
-        }
-
-        TryPost(WebView2Safe.TryGetCore(_webView));
-        TryPost(WebView2Safe.TryGetCore(_secondaryWebView));
+        _ = msg;
+        _ = from;
     }
 }

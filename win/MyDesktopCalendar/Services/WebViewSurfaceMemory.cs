@@ -5,13 +5,9 @@ using Microsoft.Web.WebView2.Wpf;
 namespace MyDesktopCalendar.Services;
 
 /// <summary>
-/// Idle-surface memory policy for the dual WebView2 architecture (App + DesktopHost).
-///
-/// Both Chromium instances used to stay at <see cref="CoreWebView2MemoryUsageTargetLevel.Normal"/>
-/// forever so mode switches never rematerialized blank. That kept ~2× RAM warm even when one
-/// HWND was cloaked or SW_HIDE'd. We now drop the idle surface to Low while keeping
-/// <see cref="Visibility.Visible"/> — Collapsed+Low was the combo that blanked on wake on
-/// some Evergreen/GPU setups; Visible+Low is the safer throttle.
+/// Memory throttle for the single WebView2 on <see cref="MainWindow"/>.
+/// Keeps the control <see cref="Visibility.Visible"/> and drops idle usage to Low
+/// (Visible+Low is safer than Collapsed+Low on some Evergreen/GPU setups).
 /// </summary>
 internal static class WebViewSurfaceMemory
 {
@@ -24,7 +20,6 @@ internal static class WebViewSurfaceMemory
 
         try
         {
-            // Never Collapsed — that path rematerialized blank after Low on older runtimes.
             if (webView.Visibility != Visibility.Visible)
             {
                 webView.Visibility = Visibility.Visible;
