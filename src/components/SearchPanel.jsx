@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { getEventLinks } from '../../shared/eventLinks.js';
 import { formatTime24, isTimedEvent } from '../lib/eventFormat.js';
 import {
   dateFromDateKey,
@@ -6,6 +7,8 @@ import {
   searchCalendarEvents,
 } from '../lib/searchEvents.js';
 import { cn } from '../lib/cn.js';
+import EventAttachIcon from './EventAttachIcon.jsx';
+import EventLinkIcon from './EventLinkIcon.jsx';
 
 /**
  * Google Calendar-style event search overlay.
@@ -118,7 +121,7 @@ export default function SearchPanel({ open, events, calendars, tags = [], onClos
           <div className="settings-scroll max-h-[min(70vh,560px)] overflow-y-auto">
             {!trimmed && (
               <p className="px-5 py-8 text-center text-sm text-gcal-muted">
-                제목, 설명, 위치, 캘린더 이름으로 검색합니다.
+                제목, 설명, 위치, 캘린더, 태그, 바로가기, 첨부파일 이름으로 검색합니다.
               </p>
             )}
 
@@ -135,6 +138,8 @@ export default function SearchPanel({ open, events, calendars, tags = [], onClos
                   const dayKey = event.occurrenceDate ?? event.startDate;
                   const color = calendar?.color ?? event.color ?? '#039be5';
                   const timeLabel = isTimedEvent(event) ? formatTime24(event.startTime) : '종일';
+                  const hasLinkOrAttach = getEventLinks(event).length > 0
+                    || (Array.isArray(event.attachments) && event.attachments.length > 0);
 
                   return (
                     <li key={event.id}>
@@ -158,8 +163,16 @@ export default function SearchPanel({ open, events, calendars, tags = [], onClos
                           aria-hidden="true"
                         />
                         <span className="min-w-0 flex-1">
-                          <span className="block truncate text-sm font-medium text-gcal-heading">
-                            {event.title || '(제목 없음)'}
+                          <span className="flex min-w-0 items-center gap-1.5">
+                            <span className="min-w-0 flex-1 truncate text-sm font-medium text-gcal-heading">
+                              {event.title || '(제목 없음)'}
+                            </span>
+                            {hasLinkOrAttach && (
+                              <span className="event-bar-trailing shrink-0">
+                                <EventLinkIcon event={event} />
+                                <EventAttachIcon event={event} />
+                              </span>
+                            )}
                           </span>
                           <span className="mt-0.5 block text-xs text-gcal-muted">
                             {formatSearchResultDate(dayKey)}

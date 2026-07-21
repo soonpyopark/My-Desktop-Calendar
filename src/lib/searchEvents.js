@@ -1,5 +1,6 @@
 import { expandEventsForRange } from '../../shared/eventOccurrences.js';
 import { compareEventsForDisplay } from '../../shared/eventBarFormat.js';
+import { getEventLinks } from '../../shared/eventLinks.js';
 import { resolveEventTags } from '../../shared/eventTags.js';
 import { toDateKey } from './calendarUtils.js';
 
@@ -16,6 +17,30 @@ export function getDefaultSearchRange(now = new Date()) {
 }
 
 /**
+ * @param {object} event
+ * @returns {string[]}
+ */
+function collectLinkSearchParts(event) {
+  const parts = [];
+  for (const link of getEventLinks(event)) {
+    if (link.title) parts.push(link.title);
+    if (link.url) parts.push(link.url);
+  }
+  return parts;
+}
+
+/**
+ * @param {object} event
+ * @returns {string[]}
+ */
+function collectAttachmentSearchParts(event) {
+  if (!Array.isArray(event?.attachments)) return [];
+  return event.attachments
+    .map((item) => item?.name || item?.fileName || item?.path || '')
+    .filter(Boolean);
+}
+
+/**
  * @param {string} query
  * @param {object} event
  * @param {object | undefined} calendar
@@ -29,6 +54,8 @@ function matchesQuery(query, event, calendar, tags) {
     event.location,
     calendar?.name,
     ...tagNames,
+    ...collectLinkSearchParts(event),
+    ...collectAttachmentSearchParts(event),
   ]
     .filter(Boolean)
     .join(' ')
@@ -38,7 +65,7 @@ function matchesQuery(query, event, calendar, tags) {
 
 /**
  * Search visible calendar events (expanded occurrences) by
- * title/description/location/calendar/tag name.
+ * title/description/location/calendar/tag name/link/attachment name.
  *
  * @param {{
  *   query: string,
