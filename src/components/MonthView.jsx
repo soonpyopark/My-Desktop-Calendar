@@ -34,6 +34,23 @@ const WEEKS_AFTER = 104;
 /** Window mode — hovering "N개 더보기" this long opens the day-events list. */
 const MORE_HOVER_DELAY_MS = 400;
 
+/**
+ * Reorder non-holiday events within one day (same contract as DayQuickEditPopover).
+ * @returns {{ event: object, sortOrder: number }[] | null}
+ */
+function buildDayReorderPayload(daySegments, fromSeriesId, toSeriesId) {
+  if (!fromSeriesId || !toSeriesId || fromSeriesId === toSeriesId) return null;
+  const ordered = (daySegments ?? []).map((segment) => segment.event).filter(Boolean);
+  const movable = ordered.filter((event) => event.calendarId !== HOLIDAYS_KR_CALENDAR_ID);
+  const fromIndex = movable.findIndex((event) => (getSeriesId(event) || event.id) === fromSeriesId);
+  const toIndex = movable.findIndex((event) => (getSeriesId(event) || event.id) === toSeriesId);
+  if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return null;
+  const next = [...movable];
+  const [moved] = next.splice(fromIndex, 1);
+  next.splice(toIndex, 0, moved);
+  return next.map((event, index) => ({ event, sortOrder: index }));
+}
+
 const MonthWeekRow = memo(function MonthWeekRow({
   week,
   weekLayout,
@@ -58,6 +75,7 @@ const MonthWeekRow = memo(function MonthWeekRow({
   onEventMouseLeave,
   onMoreOpen,
   onMoreHoverStart,
+  onReorderEvents,
   dayColors,
   interactive = true,
   completedHidden = false,
@@ -67,6 +85,10 @@ const MonthWeekRow = memo(function MonthWeekRow({
   const weekStart = week[0].date;
   const moreHoverTimerRef = useRef(null);
   const eventClickTimerRef = useRef(null);
+  const suppressEventClickRef = useRef(false);
+  const [dragSeriesId, setDragSeriesId] = useState(null);
+  const [dragDayKey, setDragDayKey] = useState(null);
+  const [dropSeriesId, setDropSeriesId] = useState(null);
   const hostSurface = desktopEmbedded;
 
   const clearMoreHoverTimer = useCallback(() => {
@@ -162,19 +184,37 @@ const MonthWeekRow = memo(function MonthWeekRow({
                 const accent = event.completed ? '#9aa0a6' : (theme.accent ?? theme.base);
                 const hasLinkOrAttach = getEventLinks(event).length > 0
                   || (Array.isArray(event.attachments) && event.attachments.length > 0);
+                const seriesId = getSeriesId(event) || event.id;
+                const canDrag = Boolean(
+                  interactive
+                  && onReorderEvents
+                  && event.calendarId !== HOLIDAYS_KR_CALENDAR_ID,
+                );
+                const isDragging = dragSeriesId === seriesId && dragDayKey === dayKey;
+                const isDropTarget = Boolean(
+                  canDrag
+                  && dropSeriesId === seriesId
+                  && dragDayKey === dayKey
+                  && dragSeriesId
+                  && dragSeriesId !== seriesId,
+                );
 
                 return (
                   <button
                     key={`${event.id}-${dayKey}`}
                     type="button"
-                    data-event-id={getSeriesId(event) || event.id}
+                    data-event-id={seriesId}
                     data-day-key={dayKey}
                     data-editable={event.calendarId === HOLIDAYS_KR_CALENDAR_ID ? '0' : '1'}
+                    draggable={canDrag}
                     className={cn(
                       'event-bar',
                       `event-bar--${segment}`,
                       continuation && 'event-bar--continuation',
                       event.completed && 'is-completed',
+                      canDrag && 'is-draggable',
+                      isDragging && 'is-dragging',
+                      isDropTarget && 'is-drop-target',
                     )}
                     style={{
                       // Prefer layout lane (stable across completed-hide) over list index.
@@ -184,19 +224,70 @@ const MonthWeekRow = memo(function MonthWeekRow({
                       color: event.completed ? '#80868b' : theme.text,
                     }}
                     onMouseEnter={(e) => {
+                      if (dragSeriesId) return;
                       // Read-only hover preview — same real-click passthrough as onContextMenu
                       // below, so this is safe on the desktop Host surface too (unlike onClick,
                       // it doesn't conflict with the native dblclick-zone create/edit model).
                       onEventMouseEnter?.(event, dayKey, e.currentTarget, e.clientX, e.clientY);
                     }}
                     onMouseMove={(e) => {
+                      if (dragSeriesId) return;
                       onEventMouseMove?.(e.clientX, e.clientY);
                     }}
                     onMouseLeave={() => {
                       onEventMouseLeave?.();
                     }}
+                    onDragStart={(e) => {
+                      if (!canDrag) return;
+                      clearEventClickTimer();
+                      onEventMouseLeave?.();
+                      suppressEventClickRef.current = false;
+                      e.dataTransfer.effectAllowed = 'move';
+                      e.dataTransfer.setData('text/plain', seriesId);
+                      e.dataTransfer.setData('application/x-day-key', dayKey);
+                      setDragSeriesId(seriesId);
+                      setDragDayKey(dayKey);
+                      setDropSeriesId(null);
+                    }}
+                    onDragEnd={() => {
+                      // Native dragend is followed by a click — swallow that one.
+                      suppressEventClickRef.current = true;
+                      setDragSeriesId(null);
+                      setDragDayKey(null);
+                      setDropSeriesId(null);
+                    }}
+                    onDragOver={(e) => {
+                      if (!canDrag || dragDayKey !== dayKey || !dragSeriesId || dragSeriesId === seriesId) {
+                        return;
+                      }
+                      e.preventDefault();
+                      e.stopPropagation();
+                      e.dataTransfer.dropEffect = 'move';
+                      if (dropSeriesId !== seriesId) setDropSeriesId(seriesId);
+                    }}
+                    onDragLeave={(e) => {
+                      if (!e.currentTarget.contains(e.relatedTarget)) {
+                        setDropSeriesId((current) => (current === seriesId ? null : current));
+                      }
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      const fromId = e.dataTransfer.getData('text/plain') || dragSeriesId;
+                      const fromDay = e.dataTransfer.getData('application/x-day-key') || dragDayKey;
+                      setDragSeriesId(null);
+                      setDragDayKey(null);
+                      setDropSeriesId(null);
+                      if (fromDay !== dayKey) return;
+                      const payload = buildDayReorderPayload(uiSegments, fromId, seriesId);
+                      if (payload) void onReorderEvents?.(payload);
+                    }}
                     onClick={(e) => {
                       e.stopPropagation();
+                      if (suppressEventClickRef.current) {
+                        suppressEventClickRef.current = false;
+                        return;
+                      }
                       // Desktop wallpaper: single-click does nothing (dblclick → full editor).
                       if (hostSurface) return;
                       // Defer single-click so a following dblclick can cancel quick-edit.
@@ -311,6 +402,7 @@ export default function MonthView({
   onEventHover,
   onCloseEventDetail,
   onEventEdit,
+  onReorderEvents,
   onVisibleMonthChange,
   onVisibleWeekChange,
   monthAlign = { token: 0, target: 'month' },
@@ -428,8 +520,8 @@ export default function MonthView({
     handleEventMouseLeave,
   } = useEventHoverPreview({
     onOpen: ({ event, dayKey, clientX, clientY }) => {
-      // Window: bar/list-row hover → detail. Click paths use onEventClick / onEventEdit.
-      (onEventHover ?? onEventDetail)?.(event, clientX, clientY, dayKey);
+      // Event-bar hover preview is opt-in via onEventHover only (not click/detail fallback).
+      onEventHover?.(event, clientX, clientY, dayKey);
     },
   });
   const [expandedDay, setExpandedDay] = useState(null);
@@ -866,13 +958,14 @@ export default function MonthView({
               onDayCreate={handleDayCreate}
               interactive={interactive}
               onEventSelect={handleEventSelect}
-              onEventDetail={(onEventDetail || onEventHover) ? handleEventDetail : undefined}
+              onEventDetail={onEventDetail ? handleEventDetail : undefined}
               onEventEdit={handleEventEdit}
-              onEventMouseEnter={handleEventMouseEnter}
-              onEventMouseMove={handleEventMouseMove}
-              onEventMouseLeave={handleEventMouseLeave}
+              onEventMouseEnter={onEventHover ? handleEventMouseEnter : undefined}
+              onEventMouseMove={onEventHover ? handleEventMouseMove : undefined}
+              onEventMouseLeave={onEventHover ? handleEventMouseLeave : undefined}
               onMoreOpen={handleMoreOpen}
               onMoreHoverStart={handleMoreHoverStart}
+              onReorderEvents={onReorderEvents}
               dayColors={dayColors}
               completedHidden={completedHidden}
               desktopEmbedded={desktopEmbedded}
@@ -889,6 +982,8 @@ export default function MonthView({
           calendars={calendars}
           tags={tags}
           anchorRect={expandedDay.anchorRect}
+          canEdit={interactive && Boolean(onReorderEvents)}
+          onReorderEvents={onReorderEvents}
           onClose={closeExpandedDay}
           onEventHover={(event, clientX, clientY, _dayKey, anchorRect) => {
             // List-row hover → read-only detail (list stays open; detail paints above).

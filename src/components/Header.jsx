@@ -5,8 +5,6 @@ import { APP_NAME, APP_VERSION } from '../../shared/constants.js';
 import { addDays, startOfWeek, toDateKey } from '../lib/calendarUtils.js';
 import { openExternalUrl } from '../lib/openExternal.js';
 import { isNeutralinoDesktopShell } from '../lib/isNeutralinoDesktopShell.js';
-import { useAppDialog } from './AppDialogProvider.jsx';
-
 const VIEW_MODE_OPTIONS = [
   { value: 'year', label: '연' },
   { value: 'week', label: '주' },
@@ -293,7 +291,6 @@ export default function Header({
   completedHidden = false,
   onToggleCompletedHidden,
 }) {
-  const { alert } = useAppDialog();
   const year = viewDate.getFullYear();
   const month = viewDate.getMonth() + 1;
   const lunarLabel = viewMode === 'month' ? getLunarMonthLabel(year, month) : null;
@@ -312,9 +309,6 @@ export default function Header({
   const [actuallyEmbedded, setActuallyEmbedded] = useState(false);
   /** Top-level WS_POPUP desktop — native clicks reach React; do not suppress onClick. */
   const [popupStyleEmbed, setPopupStyleEmbed] = useState(false);
-  const [desktopReady, setDesktopReady] = useState(true);
-  const [desktopChecks, setDesktopChecks] = useState([]);
-  const [applyingDesktop, setApplyingDesktop] = useState(false);
   const windowModeBtnRef = useRef(null);
   const headerRef = useRef(null);
 
@@ -499,8 +493,6 @@ export default function Header({
       setDesktopEditMode(false);
       setActuallyEmbedded(false);
       setPopupStyleEmbed(false);
-      setDesktopReady(true);
-      setDesktopChecks([]);
       return;
     }
     try {
@@ -513,16 +505,12 @@ export default function Header({
       // UI can resume embed, and the mode toggle stays correct while suspended.
       setDesktopEmbedded(Boolean(status.embedded) || suspended);
       setDesktopEditMode(Boolean(status.editMode) && !suspended);
-      setDesktopReady(status.ready !== false);
-      setDesktopChecks(Array.isArray(status.checks) ? status.checks : []);
     } catch {
       setDesktopWidgetAvailable(false);
       setDesktopEmbedded(false);
       setDesktopEditMode(false);
       setActuallyEmbedded(false);
       setPopupStyleEmbed(false);
-      setDesktopReady(true);
-      setDesktopChecks([]);
     }
   }, []);
 
@@ -618,74 +606,6 @@ export default function Header({
     void openExternalUrl(webEditUrl);
   }, [webEditUrl]);
 
-  const handleApplyDesktop = async () => {
-    if (!window.myCalendar?.applyWidgetToDesktop) {
-      return;
-    }
-
-    // Fresh readiness when possible — status poll may be stale.
-    let ready = desktopReady;
-    let checks = desktopChecks;
-    if (window.myCalendar.getDesktopReadiness) {
-      try {
-        const readiness = await window.myCalendar.getDesktopReadiness();
-        ready = readiness?.ready !== false && Boolean(readiness?.ready);
-        checks = Array.isArray(readiness?.checks) ? readiness.checks : checks;
-        setDesktopReady(ready);
-        setDesktopChecks(checks);
-      } catch {
-        /* keep polled state */
-      }
-    }
-
-    if (!ready) {
-      const missing = checks
-        .filter((item) => item && item.ok === false)
-        .map((item) => `• ${item.detail || item.label || '알 수 없는 조건'}`);
-      await alert(
-        [
-          '바탕화면 모드에 필요한 조건이 부족합니다.',
-          '',
-          ...(missing.length ? missing : ['• 조건을 확인할 수 없습니다']),
-          '',
-          '창 모드에서는 계속 사용할 수 있습니다.',
-        ].join('\n'),
-        { title: '바탕화면 모드' },
-      );
-      return;
-    }
-
-    setApplyingDesktop(true);
-    try {
-      publishViewNav();
-      const result = await window.myCalendar.applyWidgetToDesktop();
-      await refreshWidgetStatus();
-      // Readiness passed but the native embed itself came back without an exception and
-      // still didn't take — mirror the tray menu's post-call IsEmbedded check so this path
-      // isn't a silent no-op (see EnterDesktopModeFromTrayAsync in MainWindow.xaml.cs).
-      if (result && result.available !== false && !result.embedded) {
-        await alert(
-          ['바탕화면 모드 전환에 실패했습니다.', '', '창 모드에서는 계속 사용할 수 있습니다.'].join('\n'),
-          { title: '바탕화면 모드' },
-        );
-      }
-    } catch (err) {
-      console.error('[desktop] apply widget failed:', err);
-      await alert(
-        [
-          '바탕화면 모드 전환에 실패했습니다.',
-          '',
-          err?.message || '알 수 없는 오류',
-          '',
-          '창 모드에서는 계속 사용할 수 있습니다.',
-        ].join('\n'),
-        { title: '바탕화면 모드' },
-      );
-    } finally {
-      setApplyingDesktop(false);
-    }
-  };
-
   const handleEnterWindowMode = async () => {
     if (!window.myCalendar?.enterWidgetEditMode) {
       return;
@@ -779,25 +699,16 @@ export default function Header({
             <>
               <button
                 type="button"
-                data-ui-action="desktop-mode"
                 className={cn(
                   iconBtnClass,
-                  'disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-transparent disabled:hover:bg-transparent',
+                  'pointer-events-none',
                   isDesktopModeActive && softBlueIconBtnMutedClass,
-                  !desktopReady && !isDesktopModeActive && softBlueIconBtnMutedClass,
                 )}
                 aria-label="바탕화면"
                 aria-pressed={isDesktopModeActive}
-                aria-disabled={applyingDesktop || isDesktopModeActive || !desktopReady}
-                title={
-                  isDesktopModeActive
-                    ? '바탕화면 모드 (이동·크기조절·창 버튼 잠금)'
-                    : desktopReady
-                      ? '현재 위치·크기로 잠금 (이동·크기조절·창 버튼 숨김)'
-                      : '조건 미충족 — 클릭하여 확인'
-                }
-                disabled={applyingDesktop || isDesktopModeActive}
-                onClick={() => void handleApplyDesktop()}
+                aria-disabled="true"
+                title="바탕화면"
+                tabIndex={-1}
               >
                 <DesktopModeIcon />
               </button>
@@ -818,6 +729,34 @@ export default function Header({
               </button>
             </>
           )}
+          <button
+            type="button"
+            data-ui-action="export-excel"
+            className={cn(
+              iconBtnClass,
+              'disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-transparent disabled:hover:bg-transparent',
+            )}
+            aria-label="Excel로 내보내기"
+            title="Excel로 내보내기"
+            disabled={exporting}
+            onClick={withUiSuspend('export-excel', onExportExcel)}
+          >
+            <ExcelIcon />
+          </button>
+          <button
+            type="button"
+            data-ui-action="export-pdf"
+            className={cn(
+              iconBtnClass,
+              'disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-transparent disabled:hover:bg-transparent',
+            )}
+            aria-label="PDF로 내보내기"
+            title="PDF로 내보내기"
+            disabled={exporting}
+            onClick={withUiSuspend('export-pdf', onExportPdf)}
+          >
+            <PdfIcon />
+          </button>
           <button
             type="button"
             data-ui-action="auth"
@@ -984,28 +923,6 @@ export default function Header({
             }}
           >
             <HideCompletedCheckIcon checked={completedHidden} />
-          </button>
-          <button
-            type="button"
-            data-ui-action="export-excel"
-            className={cn(desktopModeIconBtnClass, softBlueIconBtnClass)}
-            aria-label="Excel로 내보내기"
-            title="Excel로 내보내기"
-            disabled={exporting}
-            onClick={withUiSuspend('export-excel', onExportExcel)}
-          >
-            <ExcelIcon />
-          </button>
-          <button
-            type="button"
-            data-ui-action="export-pdf"
-            className={cn(desktopModeIconBtnClass, softBlueIconBtnClass)}
-            aria-label="PDF로 내보내기"
-            title="PDF로 내보내기"
-            disabled={exporting}
-            onClick={withUiSuspend('export-pdf', onExportPdf)}
-          >
-            <PdfIcon />
           </button>
         </div>
       </div>

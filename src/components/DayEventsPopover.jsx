@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { HOLIDAYS_KR_CALENDAR_ID } from '../../shared/constants.js';
+import { getSeriesId } from '../../shared/eventOccurrences.js';
 import { useEventHoverPreview } from '../hooks/useEventHoverPreview.js';
 import { formatEventBarLabel } from '../lib/eventFormat.js';
 import { formatDayHeaderTitle } from '../lib/dayHeaderFormat.js';
@@ -20,10 +22,12 @@ export default function DayEventsPopover({
   calendars,
   tags = [],
   anchorRect,
+  canEdit = false,
   onClose,
   onEventClick,
   onEventHover,
   onEventDetail,
+  onReorderEvents,
 }) {
   const {
     clearPreview: clearHoverPreview,
@@ -38,13 +42,52 @@ export default function DayEventsPopover({
     },
   });
 
+  const [orderOverride, setOrderOverride] = useState(null);
+  const [dragSeriesId, setDragSeriesId] = useState(null);
+  const [dropSeriesId, setDropSeriesId] = useState(null);
+  const suppressClickRef = useRef(false);
+
+  const displayEvents = useMemo(() => {
+    if (!orderOverride?.length) return events ?? [];
+    const byId = new Map(
+      (events ?? []).map((row) => [getSeriesId(row.event) || row.event.id, row]),
+    );
+    const ordered = [];
+    for (const id of orderOverride) {
+      const row = byId.get(id);
+      if (row) {
+        ordered.push(row);
+        byId.delete(id);
+      }
+    }
+    for (const row of byId.values()) ordered.push(row);
+    return ordered;
+  }, [events, orderOverride]);
+
+  useEffect(() => {
+    setOrderOverride(null);
+    setDragSeriesId(null);
+    setDropSeriesId(null);
+  }, [dayKey]);
+
+  useEffect(() => {
+    if (!orderOverride) return;
+    const current = (events ?? []).map((row) => getSeriesId(row.event) || row.event.id);
+    if (
+      current.length === orderOverride.length
+      && current.every((id, index) => id === orderOverride[index])
+    ) {
+      setOrderOverride(null);
+    }
+  }, [events, orderOverride]);
+
   const popoverOptions = useMemo(
     () => ({
       width: Math.min(280, window.innerWidth - 24),
-      estimatedHeight: 48 + Math.min(events.length * 40, 280) + 12,
+      estimatedHeight: 48 + Math.min(displayEvents.length * 40, 280) + 12,
       padding: 12,
     }),
-    [events.length],
+    [displayEvents.length],
   );
   const { ref, style: anchoredStyle } = useAnchoredPopoverStyle(anchorRect, popoverOptions);
 
@@ -79,6 +122,34 @@ export default function DayEventsPopover({
     clearClickTimer();
   }, [clearClickTimer, clearHoverPreview]);
 
+  const reorderMovable = (fromSeriesId, toSeriesId) => {
+    if (!canEdit || !onReorderEvents || !fromSeriesId || !toSeriesId || fromSeriesId === toSeriesId) {
+      return;
+    }
+    const movable = displayEvents.filter(
+      (row) => row.event.calendarId !== HOLIDAYS_KR_CALENDAR_ID,
+    );
+    const fromIndex = movable.findIndex(
+      (row) => (getSeriesId(row.event) || row.event.id) === fromSeriesId,
+    );
+    const toIndex = movable.findIndex(
+      (row) => (getSeriesId(row.event) || row.event.id) === toSeriesId,
+    );
+    if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
+
+    const next = [...movable];
+    const [moved] = next.splice(fromIndex, 1);
+    next.splice(toIndex, 0, moved);
+
+    // Keep holidays in their relative slots among the full list after reorder.
+    const holidays = displayEvents.filter(
+      (row) => row.event.calendarId === HOLIDAYS_KR_CALENDAR_ID,
+    );
+    const merged = [...holidays, ...next];
+    setOrderOverride(merged.map((row) => getSeriesId(row.event) || row.event.id));
+    void onReorderEvents(next.map((row, index) => ({ event: row.event, sortOrder: index })));
+  };
+
   if (!date || !anchorRect) return null;
 
   const style = anchoredStyle ?? getAnchoredPopoverPosition(anchorRect, popoverOptions);
@@ -105,25 +176,83 @@ export default function DayEventsPopover({
         </div>
 
         <ul className="settings-scroll min-h-0 flex-1 overflow-y-auto px-2 pb-3" onMouseLeave={clearHoverPreview}>
-          {events.map(({ event, label }) => {
+          {displayEvents.map(({ event, label }) => {
             const cal = calendars.find((c) => c.id === event.calendarId);
             const completed = Boolean(event.completed);
             const color = completed ? '#9aa0a6' : (cal?.color ?? '#f6bf26');
             const hasLinkOrAttach = getEventLinks(event).length > 0
               || (Array.isArray(event.attachments) && event.attachments.length > 0);
+            const seriesId = getSeriesId(event) || event.id;
+            const isHoliday = event.calendarId === HOLIDAYS_KR_CALENDAR_ID;
+            const canDrag = canEdit && Boolean(onReorderEvents) && !isHoliday;
+            const isDragging = dragSeriesId === seriesId;
+            const isDropTarget = Boolean(
+              canDrag && dropSeriesId === seriesId && dragSeriesId && dragSeriesId !== seriesId,
+            );
 
             return (
-              <li key={`${event.id}-${dayKey}`}>
+              <li
+                key={`${seriesId}-${dayKey}`}
+                className={cn(
+                  isDragging && 'is-dragging',
+                  isDropTarget && 'is-drop-target',
+                )}
+              >
                 <button
                   type="button"
-                  className={cn('day-events-popover-item', completed && 'is-completed')}
+                  draggable={canDrag}
+                  className={cn(
+                    'day-events-popover-item',
+                    completed && 'is-completed',
+                    canDrag && 'is-draggable',
+                  )}
                   onMouseEnter={(e) => {
+                    if (dragSeriesId) return;
                     handleEventMouseEnter(event, dayKey, e.currentTarget, e.clientX, e.clientY);
                   }}
                   onMouseMove={(e) => {
+                    if (dragSeriesId) return;
                     handleEventMouseMove(e.clientX, e.clientY);
                   }}
+                  onDragStart={(e) => {
+                    if (!canDrag) return;
+                    clearClickTimer();
+                    clearHoverPreview();
+                    suppressClickRef.current = false;
+                    e.dataTransfer.effectAllowed = 'move';
+                    e.dataTransfer.setData('text/plain', seriesId);
+                    setDragSeriesId(seriesId);
+                    setDropSeriesId(null);
+                  }}
+                  onDragEnd={() => {
+                    suppressClickRef.current = true;
+                    setDragSeriesId(null);
+                    setDropSeriesId(null);
+                  }}
+                  onDragOver={(e) => {
+                    if (!canDrag || !dragSeriesId || dragSeriesId === seriesId) return;
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    if (dropSeriesId !== seriesId) setDropSeriesId(seriesId);
+                  }}
+                  onDragLeave={(e) => {
+                    if (!e.currentTarget.contains(e.relatedTarget)) {
+                      setDropSeriesId((current) => (current === seriesId ? null : current));
+                    }
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const fromId = e.dataTransfer.getData('text/plain') || dragSeriesId;
+                    setDragSeriesId(null);
+                    setDropSeriesId(null);
+                    reorderMovable(fromId, seriesId);
+                  }}
                   onClick={(e) => {
+                    if (suppressClickRef.current) {
+                      suppressClickRef.current = false;
+                      return;
+                    }
                     const { clientX, clientY } = e;
                     clearClickTimer();
                     clickTimerRef.current = window.setTimeout(() => {

@@ -201,6 +201,10 @@ export function useCalendarData() {
   const skipRemoteRefreshUntilRef = useRef(0);
   /** Pin hide toggles across racing store-updated / refresh (prevents hide↔show flicker). */
   const pinnedViewOptionsRef = useRef(null);
+  /** Pin dayColors across racing store-updated / refresh (prevents color flicker). */
+  const pinnedDayColorsRef = useRef(null);
+  /** Pin calendar.visible across racing store-updated (prevents eye-toggle flicker). */
+  const pinnedCalendarVisibilityRef = useRef(null);
   storeRef.current = store;
 
   const withoutHistory = useCallback(async (fn) => {
@@ -239,6 +243,32 @@ export function useCalendarData() {
     skipRemoteRefreshUntilRef.current = Math.max(skipRemoteRefreshUntilRef.current, until);
   }, []);
 
+  const pinDayColors = useCallback((dayColors, ms = 2000) => {
+    if (!dayColors || typeof dayColors !== 'object') return;
+    const until = Date.now() + ms;
+    pinnedDayColorsRef.current = {
+      until,
+      dayColors: { ...dayColors },
+    };
+    skipRemoteRefreshUntilRef.current = Math.max(skipRemoteRefreshUntilRef.current, until);
+  }, []);
+
+  const pinCalendarVisibility = useCallback((id, visible, ms = 2000) => {
+    const calendarId = String(id ?? '').trim();
+    if (!calendarId) return;
+    const until = Date.now() + ms;
+    const prev = pinnedCalendarVisibilityRef.current && Date.now() < pinnedCalendarVisibilityRef.current.until
+      ? pinnedCalendarVisibilityRef.current
+      : { until, map: {} };
+    pinnedCalendarVisibilityRef.current = {
+      until,
+      map: { ...prev.map, [calendarId]: Boolean(visible) },
+    };
+    // Must arm before the PATCH round-trip — SetCalendarHiddenForLogin WriteStore
+    // broadcasts store-updated that can briefly carry the pre-toggle eye state.
+    skipRemoteRefreshUntilRef.current = Math.max(skipRemoteRefreshUntilRef.current, until);
+  }, []);
+
   const applyStore = useCallback(async (nextStore) => {
     let storeToApply = nextStore;
     const pin = pinnedViewOptionsRef.current;
@@ -256,6 +286,33 @@ export function useCalendarData() {
       };
     } else if (pin && Date.now() >= pin.until) {
       pinnedViewOptionsRef.current = null;
+    }
+    const dayPin = pinnedDayColorsRef.current;
+    if (dayPin && Date.now() < dayPin.until && storeToApply && typeof storeToApply === 'object') {
+      storeToApply = {
+        ...storeToApply,
+        settings: {
+          ...storeToApply.settings,
+          dayColors: { ...dayPin.dayColors },
+        },
+      };
+    } else if (dayPin && Date.now() >= dayPin.until) {
+      pinnedDayColorsRef.current = null;
+    }
+    const visPin = pinnedCalendarVisibilityRef.current;
+    if (visPin && Date.now() < visPin.until && Array.isArray(storeToApply?.calendars)) {
+      const map = visPin.map ?? {};
+      storeToApply = {
+        ...storeToApply,
+        calendars: storeToApply.calendars.map((calendar) => {
+          if (!calendar || !Object.prototype.hasOwnProperty.call(map, calendar.id)) {
+            return calendar;
+          }
+          return { ...calendar, visible: map[calendar.id] };
+        }),
+      };
+    } else if (visPin && Date.now() >= visPin.until) {
+      pinnedCalendarVisibilityRef.current = null;
     }
     // Paint first; IndexedDB must not delay hide-events / dayColors toggles.
     storeRef.current = storeToApply;
@@ -554,6 +611,9 @@ export function useCalendarData() {
 
   const toggleCalendar = useCallback(
     async (id, visible) => {
+      // Pin + skip BEFORE paint/PATCH so a racing store-updated cannot flash the old eye.
+      pinCalendarVisibility(id, visible, 2000);
+
       // Optimistic eye-toggle first (settings panel + calendar grid update together).
       const current = storeRef.current;
       if (current) {
@@ -566,7 +626,7 @@ export function useCalendarData() {
       }
 
       // Prefer performPatchCalendar: merges the server-projected calendar.visible and
-      // sets skipRemoteRefreshUntil so a racing store-updated / guest refresh cannot
+      // extends skipRemoteRefreshUntil so a racing store-updated / guest refresh cannot
       // immediately undo the hide (common on DesktopHost's separate WebView profile).
       try {
         return await performPatchCalendar(id, { visible });
@@ -575,7 +635,7 @@ export function useCalendarData() {
         return null;
       }
     },
-    [applyStore, performPatchCalendar],
+    [applyStore, performPatchCalendar, pinCalendarVisibility],
   );
 
   const addCalendar = useCallback(
@@ -718,6 +778,11 @@ export function useCalendarData() {
       if (payload?.viewOptions) {
         pinHideViewOptions(payload.viewOptions, 2500);
       }
+      // Pin before paint so a racing store-updated cannot wipe the new map mid-click.
+      if (payload && Object.prototype.hasOwnProperty.call(payload, 'dayColors')) {
+        const nextDayColors = mergeSettings(base?.settings, payload).dayColors ?? {};
+        pinDayColors(nextDayColors, 2000);
+      }
       if (base) {
         // Paint immediately (dayColors / viewOptions toggles). Use storeRef so a stale
         // render closure cannot merge into an older snapshot.
@@ -739,10 +804,15 @@ export function useCalendarData() {
         { payload },
         (current, result) => {
           if (result && typeof result === 'object') {
-            return {
+            const merged = {
               ...current,
               settings: mergeSettings(current.settings, result),
             };
+            // Keep pin aligned with the authoritative PATCH result.
+            if (Object.prototype.hasOwnProperty.call(payload, 'dayColors')) {
+              pinDayColors(merged.settings?.dayColors ?? {}, 1500);
+            }
+            return merged;
           }
           return {
             ...current,
@@ -751,7 +821,7 @@ export function useCalendarData() {
         },
       );
     },
-    [applyStore, pinHideViewOptions, runOrQueue],
+    [applyStore, pinDayColors, pinHideViewOptions, runOrQueue],
   );
 
   const syncHolidays = useCallback(async (payload = {}) => {

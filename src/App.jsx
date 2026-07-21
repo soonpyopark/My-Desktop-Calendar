@@ -647,6 +647,23 @@ export default function App() {
     return (store?.events ?? []).find((item) => item.id === seriesId) ?? null;
   }, [store?.events]);
 
+  const handleReorderEvents = useCallback(async (ordered) => {
+    if (!isLoggedIn) {
+      await alert('관리자 로그인 후 일정 순서를 변경할 수 있습니다.');
+      return;
+    }
+    try {
+      for (const { event, sortOrder } of ordered ?? []) {
+        const master = findMasterEvent(event);
+        if (!master || master.calendarId === HOLIDAYS_KR_CALENDAR_ID) continue;
+        if (master.sortOrder === sortOrder) continue;
+        await editEvent(master.id, { sortOrder });
+      }
+    } catch (err) {
+      await alert(err instanceof Error ? err.message : '일정 순서를 저장하지 못했습니다.');
+    }
+  }, [alert, editEvent, findMasterEvent, isLoggedIn]);
+
   const openEditEvent = useCallback((event, dayKey, { fromQuickEdit = false } = {}) => {
     const abortToDesktopOrQuickEdit = () => {
       if (fromQuickEdit) {
@@ -1540,7 +1557,7 @@ export default function App() {
               setPopoverAnchor(anchorRect ?? { x: clientX, y: clientY });
             }}
             onEventDetail={(event, clientX, clientY, dayKey, anchorRect) => {
-              // Right-click detail (window + desktop embed, in-place).
+              // Right-click / list click → read-only detail (in-place).
               if (!isEventVisibleToViewer(event, calendars, false)) return;
               if (quickEdit || editorOpen) return;
               setActiveEvent(event);
@@ -1557,6 +1574,7 @@ export default function App() {
               // Bar / list-row double-click → full EventEditor.
               openEditEvent(event, dayKey, { fromQuickEdit: false });
             }}
+            onReorderEvents={handleReorderEvents}
             wheelLocked={settingsOpen || searchOpen || Boolean(quickEdit)}
           />
         )}
@@ -1668,22 +1686,7 @@ export default function App() {
               await alert(err instanceof Error ? err.message : '태그를 변경하지 못했습니다.');
             }
           }}
-          onReorderEvents={async (ordered) => {
-            if (!isLoggedIn) {
-              await alert('관리자 로그인 후 일정 순서를 변경할 수 있습니다.');
-              return;
-            }
-            try {
-              for (const { event, sortOrder } of ordered ?? []) {
-                const master = findMasterEvent(event);
-                if (!master || master.calendarId === HOLIDAYS_KR_CALENDAR_ID) continue;
-                if (master.sortOrder === sortOrder) continue;
-                await editEvent(master.id, { sortOrder });
-              }
-            } catch (err) {
-              await alert(err instanceof Error ? err.message : '일정 순서를 저장하지 못했습니다.');
-            }
-          }}
+          onReorderEvents={handleReorderEvents}
           onAttachFiles={async (event) => {
             if (!isLoggedIn) {
               await alert('관리자 로그인 후 파일을 첨부할 수 있습니다.');

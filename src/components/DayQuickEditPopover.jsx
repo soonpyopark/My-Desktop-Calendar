@@ -93,6 +93,8 @@ export default function DayQuickEditPopover({
   const [paletteStyle, setPaletteStyle] = useState(null);
   const [saving, setSaving] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState(focusEvent);
+  /** Local paint for day tint — store PATCH races used to flash the trigger gray mid-click. */
+  const [optimisticDayColor, setOptimisticDayColor] = useState(dayColor);
   /** @type {string[] | null} optimistic series-id order for non-holiday rows */
   const [orderOverride, setOrderOverride] = useState(null);
   const [dragSeriesId, setDragSeriesId] = useState(null);
@@ -101,6 +103,7 @@ export default function DayQuickEditPopover({
   const colorTriggerRef = useRef(null);
   const colorPanelRef = useRef(null);
   const resolvedDayKey = dayKey || (date ? toDateKey(date) : '');
+  const displayDayColor = optimisticDayColor;
 
   const storeDayEvents = useMemo(() => {
     if (!resolvedDayKey) return [];
@@ -141,6 +144,7 @@ export default function DayQuickEditPopover({
     setDraftTagIds([]);
     setPaletteOpen(false);
     setSelectedEvent(focusEvent);
+    setOptimisticDayColor(dayColor);
     setOrderOverride(null);
     setDragSeriesId(null);
     setDropSeriesId(null);
@@ -151,6 +155,10 @@ export default function DayQuickEditPopover({
     // calendars: only used to seed draft calendar when the day/focus changes
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional
   }, [resolvedDayKey, focusEvent]);
+
+  useEffect(() => {
+    setOptimisticDayColor(dayColor);
+  }, [dayColor]);
 
   useEffect(() => {
     if (!orderOverride) return;
@@ -260,7 +268,8 @@ export default function DayQuickEditPopover({
       window.removeEventListener('resize', place);
       window.removeEventListener('scroll', place, true);
     };
-  }, [paletteOpen, canEdit, dayColor]);
+    // dayColor must not re-place the flyout — that flash looked like color flicker.
+  }, [paletteOpen, canEdit]);
 
   useEffect(() => {
     if (!paletteOpen) return undefined;
@@ -612,8 +621,8 @@ export default function DayQuickEditPopover({
             <button
               ref={colorTriggerRef}
               type="button"
-              className={cn('day-quick-edit-color-trigger', dayColor && 'has-color')}
-              style={dayColor ? { backgroundColor: dayColor } : undefined}
+              className={cn('day-quick-edit-color-trigger', displayDayColor && 'has-color')}
+              style={displayDayColor ? { backgroundColor: displayDayColor } : undefined}
               title="날짜 배경 색상"
               aria-label="날짜 배경 색상"
               aria-expanded={paletteOpen}
@@ -624,7 +633,7 @@ export default function DayQuickEditPopover({
                 setPaletteOpen((open) => !open);
               }}
             >
-              {!dayColor && (
+              {!displayDayColor && (
                 <svg className="day-quick-edit-color-palette-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
                   <path
                     fill="currentColor"
@@ -667,8 +676,8 @@ export default function DayQuickEditPopover({
             <button
               type="button"
               className="day-quick-edit-edit"
-              title="전체 일정 편집"
-              aria-label="전체 일정 편집"
+              title="상세 일정 편집"
+              aria-label="상세 일정 편집"
               onClick={() => {
                 onOpenMore?.(date, selectedEvent);
               }}
@@ -693,8 +702,9 @@ export default function DayQuickEditPopover({
         >
           <DayColorPalette
             compact
-            value={dayColor}
+            value={displayDayColor}
             onChange={(color) => {
+              setOptimisticDayColor(color);
               void onDayColorChange?.(color);
             }}
             onRequestClose={() => setPaletteOpen(false)}
