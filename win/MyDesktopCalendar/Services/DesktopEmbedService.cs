@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Threading;
@@ -46,6 +48,16 @@ internal sealed class DesktopEmbedService
     /// <summary>Temporarily allow raise (quick-edit / day double-click).</summary>
     private bool _foregroundOverride;
     private DispatcherTimer? _bottomZOrderTimer;
+    /// <summary>Optional idle release (tray raise). React owns normal idle via activity session.</summary>
+    private DispatcherTimer? _foregroundReleaseTimer;
+    /// <summary>Tray "앞으로 가져오기" idle cap when no overlay keeps the raise alive.</summary>
+    private static readonly TimeSpan TrayForegroundIdle = TimeSpan.FromSeconds(45);
+
+    private Win32.LowLevelMouseProc? _outsideMouseProc;
+    private IntPtr _outsideMouseHook = IntPtr.Zero;
+
+    /// <summary>Fired when a temporary raise ends (idle, outside click, or explicit release).</summary>
+    public event Action? ForegroundSessionEnded;
 
     /// <summary>Desktop (locked) mode active.</summary>
     public bool IsShellParented { get; private set; }
@@ -116,8 +128,16 @@ internal sealed class DesktopEmbedService
         _alwaysOnBottom = enabled;
         if (!enabled)
         {
+            CancelForegroundReleaseTimer();
+            UninstallOutsideInputHook();
+            var wasRaised = _foregroundOverride;
             _foregroundOverride = false;
             _bottomZOrderTimer?.Stop();
+            if (wasRaised)
+            {
+                RaiseForegroundSessionEnded();
+            }
+
             return;
         }
 
@@ -131,11 +151,12 @@ internal sealed class DesktopEmbedService
     }
 
     /// <summary>
-    /// Raise above other windows for quick-edit / day interaction. Pauses HWND_BOTTOM
-    /// until <see cref="ReleaseForegroundOverride"/>.
+    /// Raise above other windows. Pauses HWND_BOTTOM until <see cref="ReleaseForegroundOverride"/>
+    /// (React idle session) or <paramref name="autoReleaseAfter"/> (tray).
     /// </summary>
-    public void BringToFront()
+    public void BringToFront(TimeSpan? autoReleaseAfter = null)
     {
+        CancelForegroundReleaseTimer();
         _foregroundOverride = true;
         if (_hwnd == IntPtr.Zero || !Win32.IsWindow(_hwnd))
         {
@@ -167,21 +188,193 @@ internal sealed class DesktopEmbedService
         }
 
         Win32.SetForegroundWindow(_hwnd);
+        InstallOutsideInputHook();
+
+        if (autoReleaseAfter is { } delay && delay > TimeSpan.Zero)
+        {
+            ScheduleForegroundRelease(delay);
+        }
     }
 
-    /// <summary>End temporary raise; return to always-on-bottom when still in desktop mode.</summary>
+    /// <summary>End temporary raise immediately; return to always-on-bottom when still locked.</summary>
     public void ReleaseForegroundOverride()
+    {
+        CancelForegroundReleaseTimer();
+        ApplyForegroundRelease();
+    }
+
+    /// <summary>Tray helper: raise with an idle cap (no quick-edit required).</summary>
+    public void BringToFrontFromTray() => BringToFront(TrayForegroundIdle);
+
+    private void ScheduleForegroundRelease(TimeSpan delay)
+    {
+        CancelForegroundReleaseTimer();
+        var timer = new DispatcherTimer { Interval = delay };
+        timer.Tick += (_, _) =>
+        {
+            CancelForegroundReleaseTimer();
+            ApplyForegroundRelease();
+        };
+        _foregroundReleaseTimer = timer;
+        timer.Start();
+    }
+
+    private void ApplyForegroundRelease()
     {
         if (!_foregroundOverride)
         {
             return;
         }
 
+        UninstallOutsideInputHook();
         _foregroundOverride = false;
         if (_alwaysOnBottom)
         {
             SendToBottom();
         }
+
+        RaiseForegroundSessionEnded();
+    }
+
+    private void CancelForegroundReleaseTimer()
+    {
+        if (_foregroundReleaseTimer is null)
+        {
+            return;
+        }
+
+        _foregroundReleaseTimer.Stop();
+        _foregroundReleaseTimer = null;
+    }
+
+    private void RaiseForegroundSessionEnded()
+    {
+        try
+        {
+            ForegroundSessionEnded?.Invoke();
+        }
+        catch
+        {
+            /* ignore listener failures */
+        }
+    }
+
+    private void InstallOutsideInputHook()
+    {
+        if (_outsideMouseHook != IntPtr.Zero)
+        {
+            return;
+        }
+
+        _outsideMouseProc = OutsideMouseHook;
+        try
+        {
+            // WH_MOUSE_LL: module handle of the hook owner (exe). Null module also works on
+            // current Windows builds; prefer the process module for older runtimes.
+            var module = Win32.GetModuleHandle(null);
+            _outsideMouseHook = Win32.SetWindowsHookEx(Win32.WH_MOUSE_LL, _outsideMouseProc, module, 0);
+            if (_outsideMouseHook == IntPtr.Zero)
+            {
+                using var process = Process.GetCurrentProcess();
+                var name = process.MainModule?.ModuleName;
+                if (!string.IsNullOrEmpty(name))
+                {
+                    _outsideMouseHook = Win32.SetWindowsHookEx(
+                        Win32.WH_MOUSE_LL,
+                        _outsideMouseProc,
+                        Win32.GetModuleHandle(name),
+                        0);
+                }
+            }
+
+            if (_outsideMouseHook == IntPtr.Zero)
+            {
+                _outsideMouseProc = null;
+            }
+        }
+        catch
+        {
+            _outsideMouseHook = IntPtr.Zero;
+            _outsideMouseProc = null;
+        }
+    }
+
+    private void UninstallOutsideInputHook()
+    {
+        if (_outsideMouseHook == IntPtr.Zero)
+        {
+            _outsideMouseProc = null;
+            return;
+        }
+
+        try
+        {
+            _ = Win32.UnhookWindowsHookEx(_outsideMouseHook);
+        }
+        catch
+        {
+            /* ignore */
+        }
+
+        _outsideMouseHook = IntPtr.Zero;
+        _outsideMouseProc = null;
+    }
+
+    private IntPtr OutsideMouseHook(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0 && _foregroundOverride && _alwaysOnBottom && lParam != IntPtr.Zero)
+        {
+            var msg = unchecked((int)wParam.ToInt64());
+            if (msg is Win32.WM_LBUTTONDOWN or Win32.WM_RBUTTONDOWN or Win32.WM_MBUTTONDOWN or Win32.WM_XBUTTONDOWN)
+            {
+                try
+                {
+                    var info = Marshal.PtrToStructure<Win32.MSLLHOOKSTRUCT>(lParam);
+                    if (!IsPointOverOurWindow(info.pt))
+                    {
+                        var dispatcher = _hostWindow?.Dispatcher;
+                        if (dispatcher is not null)
+                        {
+                            _ = dispatcher.BeginInvoke(() =>
+                            {
+                                if (_foregroundOverride && _alwaysOnBottom)
+                                {
+                                    ReleaseForegroundOverride();
+                                }
+                            });
+                        }
+                    }
+                }
+                catch
+                {
+                    /* ignore hook errors */
+                }
+            }
+        }
+
+        return Win32.CallNextHookEx(_outsideMouseHook, nCode, wParam, lParam);
+    }
+
+    private bool IsPointOverOurWindow(Win32.POINT pt)
+    {
+        if (_hwnd == IntPtr.Zero || !Win32.IsWindow(_hwnd))
+        {
+            return false;
+        }
+
+        var hit = Win32.WindowFromPoint(pt);
+        if (hit == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        if (hit == _hwnd || Win32.IsChild(_hwnd, hit))
+        {
+            return true;
+        }
+
+        var root = Win32.GetAncestor(hit, Win32.GA_ROOT);
+        return root == _hwnd;
     }
 
     /// <summary>
@@ -690,15 +883,18 @@ internal sealed class DesktopEmbedService
         ApplyBorderlessPopupStyles(_hwnd);
         ForceFullyOpaque();
 
+        // Prefer the live HWND rect so in-session mode toggles never SnapMoveAndSize
+        // from a slightly different CaptureLiveBounds / settings snapshot.
+        var live = GetCurrentBounds();
         var target = Normalize(screenBounds);
-        if (!BoundsNearlyEqual(GetCurrentBounds(), target))
+        if (!BoundsNearlyEqual(live, target))
         {
             SnapMoveAndSize(target);
         }
         else
         {
-            _lockedBounds = target;
-            _lastAppliedBounds = target;
+            _lockedBounds = live;
+            _lastAppliedBounds = live;
         }
 
         Win32.ShowWindow(_hwnd, Win32.SW_SHOWNOACTIVATE);

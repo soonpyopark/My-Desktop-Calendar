@@ -5,6 +5,8 @@ import { APP_NAME, APP_VERSION } from '../../shared/constants.js';
 import { addDays, startOfWeek, toDateKey } from '../lib/calendarUtils.js';
 import { openExternalUrl } from '../lib/openExternal.js';
 import { isNeutralinoDesktopShell } from '../lib/isNeutralinoDesktopShell.js';
+import { useAppDialog } from './AppDialogProvider.jsx';
+
 const VIEW_MODE_OPTIONS = [
   { value: 'year', label: '연' },
   { value: 'week', label: '주' },
@@ -212,7 +214,7 @@ function HideCompletedCheckIcon({ checked }) {
   );
 }
 
-/** Shared page-with-folded-corner outline that Excel/PDF icons label. */
+/** Folded-corner document outline shared by Excel/PDF export icons. */
 function DocumentOutlineIcon({ children }) {
   return (
     <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
@@ -225,18 +227,29 @@ function DocumentOutlineIcon({ children }) {
   );
 }
 
+/** Path-based X — SVG <text> glyphs can morph under WebView2 font fallback/repaint. */
 function ExcelIcon() {
   return (
     <DocumentOutlineIcon>
-      <text x="12.5" y="17.2" textAnchor="middle" fontSize="7.5" fontWeight="700" fill="currentColor">X</text>
+      <path
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.85"
+        strokeLinecap="round"
+        d="M9.4 12.4 14.6 17.6M14.6 12.4 9.4 17.6"
+      />
     </DocumentOutlineIcon>
   );
 }
 
+/** Path-based PDF mark (same reason as ExcelIcon — avoid SVG <text>). */
 function PdfIcon() {
   return (
     <DocumentOutlineIcon>
-      <text x="12.5" y="16.8" textAnchor="middle" fontSize="5.5" fontWeight="700" fill="currentColor">PDF</text>
+      <path
+        fill="currentColor"
+        d="M8.15 16.95V12.1h1.12v1.72h1.28V12.1h1.12v4.85h-1.12v-2.05H9.27v2.05H8.15zm5.02 0V12.1h1.95c.62 0 1.06.14 1.34.44.28.3.42.72.42 1.26 0 .52-.14.93-.42 1.22-.28.28-.7.43-1.26.43h-.88v1.5H13.17zm1.15-2.48h.72c.24 0 .42-.05.54-.16.12-.11.18-.28.18-.5s-.06-.4-.18-.5c-.12-.12-.3-.17-.54-.17h-.72v1.33zm3.2 2.48V12.1h1.12v3.78h1.58v1.07h-2.7z"
+      />
     </DocumentOutlineIcon>
   );
 }
@@ -291,6 +304,7 @@ export default function Header({
   completedHidden = false,
   onToggleCompletedHidden,
 }) {
+  const { alert } = useAppDialog();
   const year = viewDate.getFullYear();
   const month = viewDate.getMonth() + 1;
   const lunarLabel = viewMode === 'month' ? getLunarMonthLabel(year, month) : null;
@@ -309,6 +323,9 @@ export default function Header({
   const [actuallyEmbedded, setActuallyEmbedded] = useState(false);
   /** Top-level WS_POPUP desktop — native clicks reach React; do not suppress onClick. */
   const [popupStyleEmbed, setPopupStyleEmbed] = useState(false);
+  const [desktopReady, setDesktopReady] = useState(true);
+  const [desktopChecks, setDesktopChecks] = useState([]);
+  const [applyingDesktop, setApplyingDesktop] = useState(false);
   const windowModeBtnRef = useRef(null);
   const headerRef = useRef(null);
 
@@ -493,6 +510,8 @@ export default function Header({
       setDesktopEditMode(false);
       setActuallyEmbedded(false);
       setPopupStyleEmbed(false);
+      setDesktopReady(true);
+      setDesktopChecks([]);
       return;
     }
     try {
@@ -505,12 +524,16 @@ export default function Header({
       // UI can resume embed, and the mode toggle stays correct while suspended.
       setDesktopEmbedded(Boolean(status.embedded) || suspended);
       setDesktopEditMode(Boolean(status.editMode) && !suspended);
+      setDesktopReady(status.ready !== false);
+      setDesktopChecks(Array.isArray(status.checks) ? status.checks : []);
     } catch {
       setDesktopWidgetAvailable(false);
       setDesktopEmbedded(false);
       setDesktopEditMode(false);
       setActuallyEmbedded(false);
       setPopupStyleEmbed(false);
+      setDesktopReady(true);
+      setDesktopChecks([]);
     }
   }, []);
 
@@ -606,6 +629,75 @@ export default function Header({
     void openExternalUrl(webEditUrl);
   }, [webEditUrl]);
 
+  /** Same path as tray "바탕화면 모드": readiness check → applyWidgetToDesktop. */
+  const handleApplyDesktop = async () => {
+    if (!window.myCalendar?.applyWidgetToDesktop) {
+      return;
+    }
+    if (isDesktopModeActive || applyingDesktop) {
+      return;
+    }
+
+    let ready = desktopReady;
+    let checks = desktopChecks;
+    if (window.myCalendar.getDesktopReadiness) {
+      try {
+        const readiness = await window.myCalendar.getDesktopReadiness();
+        ready = readiness?.ready !== false && Boolean(readiness?.ready);
+        checks = Array.isArray(readiness?.checks) ? readiness.checks : checks;
+        setDesktopReady(ready);
+        setDesktopChecks(checks);
+      } catch {
+        /* keep polled state */
+      }
+    }
+
+    if (!ready) {
+      const missing = checks
+        .filter((item) => item && item.ok === false)
+        .map((item) => `• ${item.detail || item.label || '알 수 없는 조건'}`);
+      await alert(
+        [
+          '바탕화면 모드에 필요한 조건이 부족합니다.',
+          '',
+          ...(missing.length ? missing : ['• 조건을 확인할 수 없습니다']),
+          '',
+          '창 모드에서는 계속 사용할 수 있습니다.',
+        ].join('\n'),
+        { title: '바탕화면 모드' },
+      );
+      return;
+    }
+
+    setApplyingDesktop(true);
+    try {
+      publishViewNav();
+      const result = await window.myCalendar.applyWidgetToDesktop();
+      await refreshWidgetStatus();
+      // Mirror tray EnterDesktopModeFromTrayAsync: readiness passed but embed/lock failed.
+      if (result && result.available !== false && !result.embedded) {
+        await alert(
+          ['바탕화면 모드 전환에 실패했습니다.', '', '창 모드에서는 계속 사용할 수 있습니다.'].join('\n'),
+          { title: '바탕화면 모드' },
+        );
+      }
+    } catch (err) {
+      console.error('[desktop] apply widget failed:', err);
+      await alert(
+        [
+          '바탕화면 모드 전환에 실패했습니다.',
+          '',
+          err?.message || '알 수 없는 오류',
+          '',
+          '창 모드에서는 계속 사용할 수 있습니다.',
+        ].join('\n'),
+        { title: '바탕화면 모드' },
+      );
+    } finally {
+      setApplyingDesktop(false);
+    }
+  };
+
   const handleEnterWindowMode = async () => {
     if (!window.myCalendar?.enterWidgetEditMode) {
       return;
@@ -695,40 +787,6 @@ export default function Header({
               <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z" /></svg>
             </button>
           )}
-          {desktopWidgetAvailable && (
-            <>
-              <button
-                type="button"
-                className={cn(
-                  iconBtnClass,
-                  'pointer-events-none',
-                  isDesktopModeActive && softBlueIconBtnMutedClass,
-                )}
-                aria-label="바탕화면"
-                aria-pressed={isDesktopModeActive}
-                aria-disabled="true"
-                title="바탕화면"
-                tabIndex={-1}
-              >
-                <DesktopModeIcon />
-              </button>
-              <button
-                ref={windowModeBtnRef}
-                type="button"
-                className={cn(
-                  iconBtnClass,
-                  'disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-transparent disabled:hover:bg-transparent',
-                  isWindowModeActive && softBlueIconBtnMutedClass,
-                )}
-                aria-label="창모드"
-                aria-pressed={isWindowModeActive}
-                title="잠금 해제 — 이동·크기조절·창 버튼 사용"
-                onClick={() => void handleEnterWindowMode()}
-              >
-                <WindowModeIcon />
-              </button>
-            </>
-          )}
           <button
             type="button"
             data-ui-action="export-excel"
@@ -757,6 +815,49 @@ export default function Header({
           >
             <PdfIcon />
           </button>
+          {desktopWidgetAvailable && (
+            <>
+              <button
+                type="button"
+                data-ui-action="desktop-mode"
+                className={cn(
+                  iconBtnClass,
+                  'disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-transparent disabled:hover:bg-transparent',
+                  isDesktopModeActive && softBlueIconBtnMutedClass,
+                  !desktopReady && !isDesktopModeActive && softBlueIconBtnMutedClass,
+                )}
+                aria-label="바탕화면"
+                aria-pressed={isDesktopModeActive}
+                aria-disabled={applyingDesktop || isDesktopModeActive || !desktopReady}
+                title={
+                  isDesktopModeActive
+                    ? '바탕화면 모드 (이동·크기조절·창 버튼 잠금)'
+                    : desktopReady
+                      ? '현재 위치·크기로 잠금 (이동·크기조절·창 버튼 숨김)'
+                      : '조건 미충족 — 클릭하여 확인'
+                }
+                disabled={applyingDesktop || isDesktopModeActive}
+                onClick={() => void handleApplyDesktop()}
+              >
+                <DesktopModeIcon />
+              </button>
+              <button
+                ref={windowModeBtnRef}
+                type="button"
+                className={cn(
+                  iconBtnClass,
+                  'disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-transparent disabled:hover:bg-transparent',
+                  isWindowModeActive && softBlueIconBtnMutedClass,
+                )}
+                aria-label="창모드"
+                aria-pressed={isWindowModeActive}
+                title="잠금 해제 — 이동·크기조절·창 버튼 사용"
+                onClick={() => void handleEnterWindowMode()}
+              >
+                <WindowModeIcon />
+              </button>
+            </>
+          )}
           <button
             type="button"
             data-ui-action="auth"

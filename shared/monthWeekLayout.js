@@ -35,20 +35,11 @@ function getEventSegmentType(event, dayKey) {
 
 /**
  * @param {{ date: Date }[]} week
- * @param {object[]} events
- */
-/**
- * @param {{ date: Date }[]} week
- * @param {object[]} events
+ * @param {object[]} weekEvents Already expanded + sorted for this week (or a superset filtered to it)
  * @param {object[]} [tags]
  */
-export function buildWeekEventLayout(week, events, tags) {
+function layoutWeekFromEvents(week, weekEvents, tags) {
   const dayKeys = week.map(({ date }) => toDateKey(date));
-  const rangeStart = dayKeys[0];
-  const rangeEnd = dayKeys[dayKeys.length - 1];
-
-  const weekEvents = expandEventsForRange(events, rangeStart, rangeEnd)
-    .sort(compareEventsForDisplay);
 
   /** @type {Map<string, Set<number>>} */
   const occupiedByDay = new Map(dayKeys.map((dayKey) => [dayKey, new Set()]));
@@ -96,6 +87,47 @@ export function buildWeekEventLayout(week, events, tags) {
   }
 
   return layoutByDay;
+}
+
+/**
+ * @param {{ date: Date }[]} week
+ * @param {object[]} events
+ * @param {object[]} [tags]
+ */
+export function buildWeekEventLayout(week, events, tags) {
+  const dayKeys = week.map(({ date }) => toDateKey(date));
+  const weekEvents = expandEventsForRange(events, dayKeys[0], dayKeys[dayKeys.length - 1])
+    .sort(compareEventsForDisplay);
+  return layoutWeekFromEvents(week, weekEvents, tags);
+}
+
+/**
+ * Expand once for the whole window, then lane each week (avoids N× recurrence walks).
+ * @param {{ date: Date }[][]} weeks
+ * @param {object[]} events
+ * @param {object[]} [tags]
+ * @returns {Map<string, Record<string, object[]>>}
+ */
+export function buildAllWeekEventLayouts(weeks, events, tags) {
+  /** @type {Map<string, Record<string, object[]>>} */
+  const layouts = new Map();
+  if (!weeks.length) return layouts;
+
+  const rangeStart = toDateKey(weeks[0][0].date);
+  const lastWeek = weeks[weeks.length - 1];
+  const rangeEnd = toDateKey(lastWeek[lastWeek.length - 1].date);
+  const expanded = expandEventsForRange(events, rangeStart, rangeEnd)
+    .sort(compareEventsForDisplay);
+
+  for (const week of weeks) {
+    const weekStartKey = toDateKey(week[0].date);
+    const weekEndKey = toDateKey(week[week.length - 1].date);
+    const weekEvents = expanded.filter(
+      (event) => event.endDate >= weekStartKey && event.startDate <= weekEndKey,
+    );
+    layouts.set(weekStartKey, layoutWeekFromEvents(week, weekEvents, tags));
+  }
+  return layouts;
 }
 
 /**

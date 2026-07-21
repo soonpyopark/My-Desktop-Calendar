@@ -1,1 +1,5 @@
-export { buildWeekEventLayout, countHiddenWeekEvents } from '../../shared/monthWeekLayout.js';
+export {
+  buildWeekEventLayout,
+  buildAllWeekEventLayouts,
+  countHiddenWeekEvents,
+} from '../../shared/monthWeekLayout.js';

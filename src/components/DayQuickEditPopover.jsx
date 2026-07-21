@@ -176,7 +176,11 @@ export default function DayQuickEditPopover({
     if (!selectedEvent) return;
     const sid = getSeriesId(selectedEvent) || selectedEvent.id;
     const live = dayEvents.find((event) => (getSeriesId(event) || event.id) === sid);
-    if (!live) return;
+    // Deleted / no longer on this day — clear selection so the row does not look "stuck".
+    if (!live) {
+      setSelectedEvent(null);
+      return;
+    }
     const prevCount = Array.isArray(selectedEvent.attachments) ? selectedEvent.attachments.length : 0;
     const nextCount = Array.isArray(live.attachments) ? live.attachments.length : 0;
     const prevTags = normalizeTagIds(selectedEvent.tagIds).join('\0');

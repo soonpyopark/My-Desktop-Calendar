@@ -126,6 +126,15 @@ internal sealed class NativeBridge
         });
     }
 
+    /// <summary>Desktop raise session ended (outside click / idle / unlock).</summary>
+    public void NotifyForegroundSessionEnded()
+    {
+        PostEvent(new JsonObject
+        {
+            ["type"] = "foreground-session-ended",
+        });
+    }
+
     /// <summary>
     /// Period row chrome that stays on the desktop surface (no App unlock). Deliberately
     /// excludes hide/show-events and hide/show-completed — those toggle a persisted
@@ -1065,12 +1074,14 @@ internal sealed class NativeBridge
             }
             else
             {
-                var bounds = _embed.LockedBounds;
+                // Keep the live window footprint. Stale LockedBounds (factory / prior desktop
+                // session) used to SnapMoveAndSize and grow the window on mode switch —
+                // desktop mode should only hide min/max/close + lock, not resize.
                 _window.Dispatcher.InvokeAsync(async () =>
                 {
                     if (_surfaces is not null)
                     {
-                        await _surfaces.EnterDesktopModeAsync(bounds).ConfigureAwait(true);
+                        await _surfaces.EnterDesktopModeAsync(bounds: null).ConfigureAwait(true);
                     }
                 }).Task.Unwrap().GetAwaiter().GetResult();
             }

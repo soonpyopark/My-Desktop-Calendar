@@ -2,6 +2,14 @@
 export default {
   darkMode: 'class',
   content: ['./src/**/*.{js,jsx,html}'],
+  // Month bars build class names as `event-bar--${segment}` — keep those rules in CSS.
+  safelist: [
+    'event-bar--single',
+    'event-bar--start',
+    'event-bar--middle',
+    'event-bar--end',
+    'event-bar--continuation',
+  ],
   theme: {
     extend: {
       colors: {

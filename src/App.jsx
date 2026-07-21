@@ -16,6 +16,7 @@ import { useAppDialog } from './components/AppDialogProvider.jsx';
 import { useAuth } from './hooks/useAuth.js';
 import { useCalendarData } from './hooks/useCalendarData.js';
 import { useUndoRedoShortcuts } from './hooks/useUndoRedoShortcuts.js';
+import { useDesktopForegroundSession } from './hooks/useDesktopForegroundSession.js';
 import { downloadExportResponse } from './lib/downloadExport.js';
 import { addEventAttachments, fetchExport } from './lib/api.js';
 import { openExternalUrl } from './lib/openExternal.js';
@@ -441,8 +442,20 @@ export default function App() {
   const handleVisibleWeekChange = useCallback((weekStart) => {
     // Read the ref, not the closed-over `viewMode` — see viewModeRef comment above.
     if (viewModeRef.current !== 'week') return;
-    setSelectedDate(weekStart);
-    setViewDate(weekStart);
+    setSelectedDate((prev) => (
+      prev && prev.getFullYear() === weekStart.getFullYear()
+        && prev.getMonth() === weekStart.getMonth()
+        && prev.getDate() === weekStart.getDate()
+        ? prev
+        : weekStart
+    ));
+    setViewDate((prev) => (
+      prev.getFullYear() === weekStart.getFullYear()
+        && prev.getMonth() === weekStart.getMonth()
+        && prev.getDate() === weekStart.getDate()
+        ? prev
+        : weekStart
+    ));
   }, []);
 
   const snapshotAnchorRect = useCallback((rect) => {
@@ -485,10 +498,10 @@ export default function App() {
     };
   }, [snapshotAnchorRect, viewMode]);
 
-  /** Day-cell double-click / 더보기 → quick-edit (not the full EventEditor). */
+  /** Day-cell / 더보기 → quick-edit (bar double-click uses openEditEvent instead). */
   const openDayQuickEdit = useCallback((date, anchorRect, { focusEvent = null } = {}) => {
     if (!isLoggedIn) return;
-    // Desktop mode sits under other apps — raise for the quick-edit interaction.
+    // Desktop locked sits under other apps — raise while the overlay is open.
     if (isNativeHost()) {
       void window.myCalendar?.bringWindowToFront?.();
     }
@@ -737,8 +750,8 @@ export default function App() {
     openDayQuickEdit(date, resolveDayQuickEditRect(date), { focusEvent: event });
   }, [isLoggedIn, openDayQuickEdit, resolveDayQuickEditRect, store?.calendars]);
 
-  // Embedded day/event double-click → native undock + pending create/edit → open editor.
-  // Embedded search/settings/… → pending UI action → open panel in place (no undock).
+  // Desktop overlays: settings/search/auth/export may arrive as pendingUiAction from native.
+  // Create/edit pending is resume-reopen only — day/bar clicks open QE/editor directly in React.
   useEffect(() => {
     if (!isNeutralinoDesktopShell()) {
       return undefined;
@@ -797,7 +810,7 @@ export default function App() {
         void resumeDesktopEmbedIfNeeded();
         return;
       }
-      // Desktop (zone) bar double-click → full EventEditor.
+      // Resume-reopen after overlay: bar edit → full EventEditor.
       openEditEvent(event, dayKey, { fromQuickEdit: false });
     };
 
@@ -1255,6 +1268,8 @@ export default function App() {
         window.location.reload();
         return;
       case 'desktop-mode':
+        // Same as header / tray: enter locked desktop mode.
+        void window.myCalendar?.applyWidgetToDesktop?.();
         return;
       default:
         break;
@@ -1340,26 +1355,34 @@ export default function App() {
     };
   }, []);
 
+  const hasStore = Boolean(store);
   useEffect(() => {
-    if (!loading && store) {
+    if (!loading && hasStore) {
       notifyShellReady();
       // First-launch window mode on Win11 24H2: re-apply resize chrome after UI is up.
       void window.myCalendar?.ensureWindowResizable?.();
     }
-  }, [loading, store]);
+    // `hasStore` (not `store`) is intentional — `notifyShellReady()` triggers a native
+    // "content-ready" round trip that re-pushes a *fresh* store object (new `updatedAt`
+    // every time), which would change `store`'s reference and re-fire this effect,
+    // which sends content-ready again... an infinite loop that pegged the native bridge
+    // at 100-260 calls/sec and ran WebView2 RAM up into the GBs. Only fire once per
+    // loading→loaded transition.
+  }, [loading, hasStore]);
 
-  // Desktop always-on-bottom: stay raised while quick-edit (or the full editor opened
-  // from it) is up; return under other windows when both are closed.
+  // Desktop locked: any in-app double-click raises; stay up while pointer is down /
+  // overlays are open; idle (~10s) or outside click returns under other apps.
   // Must stay above any early return — conditional hooks trigger React #310.
-  useEffect(() => {
-    if (!isNativeHost() || !window.myCalendar) return undefined;
-    if (quickEdit || editorOpen) {
-      void window.myCalendar.bringWindowToFront?.();
-      return undefined;
-    }
-    void window.myCalendar.releaseWindowForeground?.();
-    return undefined;
-  }, [quickEdit, editorOpen]);
+  useDesktopForegroundSession({
+    keepRaised: Boolean(
+      quickEdit
+      || editorOpen
+      || settingsOpen
+      || searchOpen
+      || loginOpen
+      || scopeDialog,
+    ),
+  });
 
   // Login wall: show the login dialog first whenever the app isn't authenticated yet.
   const autoLoginPromptedRef = useRef(false);
@@ -1544,7 +1567,7 @@ export default function App() {
             onDayQuickEdit={openDayQuickEdit}
             onCreateDate={(date) => openDayQuickEditForDate(date)}
             onEventClick={(event, _clientX, _clientY, dayKey) => {
-              // Window: schedule-bar single-click → quick-edit. Desktop embed: no-op.
+              // Window: bar single-click → quick-edit. Desktop locked: MonthView no-ops first.
               if (isDesktopSurfaceHost()) return;
               openDayQuickEditForEvent(event, dayKey);
             }}

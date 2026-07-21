@@ -80,11 +80,75 @@ function detachSystemListener() {
   systemMediaHandler = null;
 }
 
+const THEME_ANIM_MS = 280;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let themeAnimTimer = null;
+
+/**
+ * @param {HTMLElement} root
+ * @param {{ dark: boolean, scheme: ColorScheme, effective: 'light' | 'dark' }} next
+ */
+function paintColorScheme(root, { dark, scheme, effective }) {
+  root.classList.toggle('dark', dark);
+  root.dataset.colorScheme = scheme;
+  root.style.colorScheme = effective;
+  // Do not set solid backgroundColor here — CSS theme variables control the page fill.
+  root.style.removeProperty('background-color');
+  if (document.body) {
+    document.body.style.removeProperty('background-color');
+  }
+  persistScheme(scheme, effective);
+
+  try {
+    window.dispatchEvent(
+      new CustomEvent('mycalendar:colorSchemeEffective', {
+        detail: { dark, scheme },
+      }),
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Cross-fade light↔dark instead of an instant hard cut.
+ * @param {() => void} apply
+ */
+function runThemeTransition(apply) {
+  if (typeof document === 'undefined') {
+    apply();
+    return;
+  }
+
+  const root = document.documentElement;
+  if (typeof document.startViewTransition === 'function') {
+    try {
+      document.startViewTransition(apply);
+      return;
+    } catch {
+      /* fall through to CSS class animation */
+    }
+  }
+
+  root.classList.add('theme-animating');
+  apply();
+  if (themeAnimTimer != null) {
+    clearTimeout(themeAnimTimer);
+  }
+  themeAnimTimer = setTimeout(() => {
+    themeAnimTimer = null;
+    root.classList.remove('theme-animating');
+  }, THEME_ANIM_MS);
+}
+
 /**
  * Apply theme class/colors without waiting for React store.
  * @param {unknown} mode
+ * @param {{ animate?: boolean }} [options]
+ *   animate — cross-fade when the effective light/dark flips (default true).
+ *   Boot / first paint should pass false so the shell does not fade in.
  */
-export function applyColorScheme(mode) {
+export function applyColorScheme(mode, { animate = true } = {}) {
   if (typeof document === 'undefined') return;
 
   const normalized = normalizeColorScheme(mode);
@@ -105,24 +169,16 @@ export function applyColorScheme(mode) {
     }
   }
 
-  root.classList.toggle('dark', dark);
-  root.dataset.colorScheme = normalized;
-  root.style.colorScheme = effective;
-  // Do not set solid backgroundColor here — CSS theme variables control the page fill.
-  root.style.removeProperty('background-color');
-  if (document.body) {
-    document.body.style.removeProperty('background-color');
-  }
-  persistScheme(normalized, effective);
+  const hadPriorScheme = Boolean(root.dataset.colorScheme);
+  const schemeChanged = root.dataset.colorScheme !== normalized
+    || root.classList.contains('dark') !== dark;
 
-  try {
-    window.dispatchEvent(
-      new CustomEvent('mycalendar:colorSchemeEffective', {
-        detail: { dark, scheme: normalized },
-      }),
-    );
-  } catch {
-    /* ignore */
+  const paint = () => paintColorScheme(root, { dark, scheme: normalized, effective });
+  // Only animate user-driven flips after an initial scheme is already painted.
+  if (animate && hadPriorScheme && schemeChanged) {
+    runThemeTransition(paint);
+  } else {
+    paint();
   }
 
   detachSystemListener();
@@ -132,22 +188,13 @@ export function applyColorScheme(mode) {
   const mq = window.matchMedia('(prefers-color-scheme: dark)');
   const handler = () => {
     const nextDark = mq.matches;
-    root.classList.toggle('dark', nextDark);
-    root.style.colorScheme = nextDark ? 'dark' : 'light';
-    root.style.removeProperty('background-color');
-    if (document.body) {
-      document.body.style.removeProperty('background-color');
+    const nextEffective = nextDark ? 'dark' : 'light';
+    if (root.classList.contains('dark') === nextDark && root.style.colorScheme === nextEffective) {
+      return;
     }
-    persistScheme('system', nextDark ? 'dark' : 'light');
-    try {
-      window.dispatchEvent(
-        new CustomEvent('mycalendar:colorSchemeEffective', {
-          detail: { dark: nextDark, scheme: 'system' },
-        }),
-      );
-    } catch {
-      /* ignore */
-    }
+    runThemeTransition(() => {
+      paintColorScheme(root, { dark: nextDark, scheme: 'system', effective: nextEffective });
+    });
   };
   mq.addEventListener('change', handler);
   systemMediaQuery = mq;
@@ -161,7 +208,7 @@ export function applyColorScheme(mode) {
 export function bootstrapColorScheme() {
   const stored = readStoredColorScheme();
   const mode = stored ?? DEFAULT_VIEW_OPTIONS.colorScheme;
-  applyColorScheme(mode);
+  applyColorScheme(mode, { animate: false });
   return mode;
 }
 

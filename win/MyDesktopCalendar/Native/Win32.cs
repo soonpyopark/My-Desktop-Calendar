@@ -53,6 +53,8 @@ internal static class Win32
     public const uint GW_HWNDLAST = 1;
     public const uint GW_HWNDNEXT = 2;
     public const uint GW_HWNDPREV = 3;
+    public const int SM_CXFRAME = 32;
+    public const int SM_CXPADDEDBORDER = 92;
     public const int SM_XVIRTUALSCREEN = 76;
     public const int SM_YVIRTUALSCREEN = 77;
     public const int SM_CXVIRTUALSCREEN = 78;
@@ -112,7 +114,13 @@ internal static class Win32
     public const int WM_ACTIVATE = 0x0006;
     public const int WM_SHOWWINDOW = 0x0018;
     public const int WM_SIZE = 0x0005;
+    public const int WM_NCHITTEST = 0x0084;
     public const int SIZE_MINIMIZED = 1;
+
+    public const int HTCLIENT = 1;
+    public const int HTCAPTION = 2;
+    public const int HTLEFT = 10;
+    public const int HTBOTTOMRIGHT = 17;
 
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -154,6 +162,7 @@ internal static class Win32
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool SetWindowPos(
         IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
 
     [DllImport("user32.dll")]
     public static extern bool IsWindow(IntPtr hWnd);
@@ -279,6 +288,36 @@ internal static class Win32
 
     [DllImport("user32.dll")]
     public static extern bool IsChild(IntPtr hWndParent, IntPtr hWnd);
+
+    public const int WH_MOUSE_LL = 14;
+    public const int WM_LBUTTONDOWN = 0x0201;
+    public const int WM_RBUTTONDOWN = 0x0204;
+    public const int WM_MBUTTONDOWN = 0x0207;
+    public const int WM_XBUTTONDOWN = 0x020B;
+
+    public delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MSLLHOOKSTRUCT
+    {
+        public POINT pt;
+        public uint mouseData;
+        public uint flags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr GetModuleHandle(string? lpModuleName);
 
     [DllImport("user32.dll")]
     public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);

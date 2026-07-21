@@ -73,7 +73,7 @@ export default function SearchPanel({ open, events, calendars, tags = [], onClos
         onClick={(event) => event.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label="일정 검색"
+        aria-label="검색어 입력"
       >
         <div className="shell-solid-surface overflow-hidden rounded-2xl shadow-[0_8px_28px_rgba(0,0,0,0.18)]">
           <div className="flex items-center gap-2 border-b border-gcal-border-light px-3 py-2.5">
@@ -90,9 +90,9 @@ export default function SearchPanel({ open, events, calendars, tags = [], onClos
               type="search"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="일정 검색"
+              placeholder="검색어 입력"
               className="min-w-0 flex-1 border-0 bg-transparent py-2 text-base text-gcal-heading outline-none placeholder:text-gcal-muted"
-              aria-label="일정 검색"
+              aria-label="검색어 입력"
             />
             {trimmed && (
               <button

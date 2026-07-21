@@ -92,6 +92,41 @@
     background-color: var(--gcal-page);
   }
 
+  /*
+   * Light↔dark: soft cross-fade instead of an instant hard cut.
+   * - View Transitions API when available (WebView2 / Chromium)
+   * - Fallback: brief .theme-animating window with color transitions
+   */
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-duration: 0.28s;
+    animation-timing-function: ease;
+  }
+
+  html.theme-animating,
+  html.theme-animating body,
+  html.theme-animating #root,
+  html.theme-animating .shell-solid-surface,
+  html.theme-animating [class*='bg-gcal'],
+  html.theme-animating [class*='text-gcal'],
+  html.theme-animating [class*='border-gcal'],
+  html.theme-animating header,
+  html.theme-animating main,
+  html.theme-animating aside,
+  html.theme-animating footer,
+  html.theme-animating .day-cell,
+  html.theme-animating .month-view,
+  html.theme-animating .month-weekdays,
+  html.theme-animating [data-shell-chrome] {
+    transition:
+      background-color 0.28s ease,
+      color 0.28s ease,
+      border-color 0.28s ease,
+      fill 0.28s ease,
+      stroke 0.28s ease,
+      box-shadow 0.28s ease !important;
+  }
+
   /* Dialogs / editors stay opaque so text stays readable over the translucent shell. */
   .shell-solid-surface {
     background-color: var(--gcal-page-solid);
@@ -348,6 +383,9 @@
     color: var(--event-text, #3c4043);
     background-color: var(--event-bg, #e8eaed);
     z-index: 1;
+    padding-left: 0;
+    padding-right: 3px;
+    gap: 0;
   }
 
   .event-bar.is-draggable {
@@ -367,6 +405,11 @@
     z-index: 2;
   }
 
+  /*
+   * Segment geometry must stay in the build even when class names are composed as
+   * `event-bar--${segment}` (Tailwind content scan cannot see those literals).
+   * Also listed in tailwind.config.js safelist.
+   */
   .event-bar--single {
     left: 2px;
     right: 2px;
@@ -420,18 +463,20 @@
   }
 
   /*
-   * Trailing link/attach icons stay visible; the label (title) shrinks with ellipsis.
-   * Do not put max-w-full on the label — that can claim the full bar width and clip icons.
+   * Trailing link/attach icons stay visible; the title shrinks with ellipsis.
+   * Month bars use a flat flex row (same as DayEventsPopover): accent | meta | title | icons.
    */
+  /* Pin link/attach icons to the bar's right edge; title flex-shrinks with ellipsis. */
   .event-bar-trailing {
     @apply inline-flex shrink-0 items-center;
     gap: 2px;
-    padding-right: 3px;
+    margin-left: auto;
+    padding-left: 2px;
   }
 
   .event-link-icon,
   .event-attach-icon {
-    @apply inline-flex shrink-0 items-center justify-center opacity-85;
+    @apply inline-flex shrink-0 items-center justify-center opacity-90;
     width: 12px;
     height: 12px;
   }
@@ -449,10 +494,19 @@
     line-height: 1;
   }
 
+  /* Legacy wrapper still used by exports / older markup */
   .event-bar-label {
     @apply flex min-h-0 min-w-0 flex-1 items-center overflow-hidden;
     padding-left: 1ch;
     padding-right: 2px;
+  }
+
+  /* Space meta/title away from the accent (and from each other). */
+  .event-bar > .event-time,
+  .event-bar > .event-day-index,
+  .event-bar > .event-tag-icons,
+  .event-bar > .event-title {
+    margin-left: 1ch;
   }
 
   .event-bar-label > .event-time + .event-day-index,

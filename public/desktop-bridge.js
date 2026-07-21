@@ -40,6 +40,9 @@
       if (data.type === 'widget-status' && data.status) {
         dispatchWidgetStatus(data.status);
       }
+      if (data.type === 'foreground-session-ended') {
+        window.dispatchEvent(new CustomEvent('mycalendar:foregroundSessionEnded'));
+      }
       if (data.type === 'server-mode-changed') {
         window.dispatchEvent(new CustomEvent('mycalendar:serverModeChanged', { detail: data }));
       }
@@ -405,7 +408,7 @@
     postToShell('mycalendar:window-close');
   }
 
-  /** Desktop mode: raise above other windows for quick-edit / day double-click. */
+  /** Desktop mode: raise above other windows (activity session / overlays / tray). */
   function bringWindowToFront() {
     if (isNativeHost()) {
       return api('POST', '/api/window/bring-to-front');
@@ -413,7 +416,7 @@
     return Promise.resolve({ ok: true });
   }
 
-  /** Desktop mode: return to always-on-bottom after quick-edit closes. */
+  /** Desktop mode: return to always-on-bottom immediately (idle session calls this). */
   function releaseWindowForeground() {
     if (isNativeHost()) {
       return api('POST', '/api/window/release-foreground');

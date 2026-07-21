@@ -32,6 +32,7 @@ export function useMonthWeekScroll({
   const wheelLockRef = useRef(false);
   const onVisibleMonthChangeRef = useRef(onVisibleMonthChange);
   const onVisibleWeekChangeRef = useRef(onVisibleWeekChange);
+  const reportVisibleMonthRef = useRef(() => {});
   const step = Math.max(1, Number(weeksInViewport) || WEEKS_IN_VIEWPORT);
 
   useEffect(() => {
@@ -100,10 +101,23 @@ export function useMonthWeekScroll({
       return true;
     }
 
+    // Block reportVisibleMonth for the whole smooth animation — intermediate months
+    // were rebuilding the grid every frame and climbing WebView2 RAM past 1GB.
+    aligningRef.current = true;
     container.scrollTo({ top: targetTop, behavior });
-    window.setTimeout(() => {
+
+    let finished = false;
+    const finishSmooth = () => {
+      if (finished) return;
+      finished = true;
+      container.removeEventListener('scrollend', finishSmooth);
       restoreScrollSnapOnUserInput();
-    }, 450);
+      aligningRef.current = false;
+      reportVisibleMonthRef.current();
+    };
+
+    container.addEventListener('scrollend', finishSmooth, { once: true });
+    window.setTimeout(finishSmooth, 480);
     return true;
   }, [restoreScrollSnapOnUserInput, scrollRef, weeks]);
 
@@ -171,6 +185,8 @@ export function useMonthWeekScroll({
     skipNextScrollRef.current = true;
     onChange(year, month);
   }, [getFirstVisibleWeekIndex, weeks]);
+
+  reportVisibleMonthRef.current = reportVisibleMonth;
 
   const scrollByWeek = useCallback((direction, behavior = 'smooth', weekStep = step) => {
     if (direction === 0) return;
@@ -254,7 +270,8 @@ export function useMonthWeekScroll({
 
       wheelLockRef.current = true;
       const direction = event.deltaY > 0 ? 1 : -1;
-      scrollByViewport(direction, 'smooth');
+      // Instant snap: avoids smooth-scroll intermediate month publishes / React churn.
+      scrollByViewport(direction, 'auto');
 
       window.setTimeout(() => {
         wheelLockRef.current = false;

@@ -1,9 +1,9 @@
 import { isNativeHost } from './nativeHost.js';
 
 /**
- * True when the calendar is in wallpaper desktop mode (shell-parented).
- * Backed by the latest native widgetStatus.embedded (see desktop-bridge.js).
- * Name kept for call-site compatibility; formerly meant the dual-HWND Host surface.
+ * True when the calendar is in desktop (locked) mode — always-on-bottom, chrome locked.
+ * Backed by widgetStatus.embedded (see desktop-bridge.js).
+ * Name kept for call-site compatibility.
  */
 export function isDesktopSurfaceHost() {
   try {

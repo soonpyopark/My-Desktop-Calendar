@@ -79,6 +79,17 @@ public partial class MainWindow : Window
             action => _bridge.SuspendForUi(action));
         _bridge = new NativeBridge(_store, _auth, _embed, _undockZones, this);
         _bridge.BindSurfaces(_surfaces);
+        _embed.ForegroundSessionEnded += () =>
+        {
+            try
+            {
+                _bridge.NotifyForegroundSessionEnded();
+            }
+            catch
+            {
+                /* ignore */
+            }
+        };
         StartWebServerOnLaunch();
 
         SourceInitialized += OnSourceInitialized;
@@ -110,6 +121,14 @@ public partial class MainWindow : Window
             if (!_embed.IsEmbedded && !_resizeContentFrozen)
             {
                 EnsureWebViewRematerialized();
+            }
+        };
+        // Click/focus moved to another app — end the temporary raise (hook may also fire).
+        Deactivated += (_, _) =>
+        {
+            if (_windowLocked && _embed.IsForegroundOverride)
+            {
+                _embed.ReleaseForegroundOverride();
             }
         };
         Closing += OnClosing;
@@ -429,7 +448,15 @@ public partial class MainWindow : Window
         _windowLocked = locked;
         try
         {
-            ResizeMode = locked ? ResizeMode.NoResize : ResizeMode.CanResize;
+            // Keep ResizeMode.CanResize in both modes. Toggling NoResize removes the
+            // WS_THICKFRAME hit-test border and expands the client area (~6px/side),
+            // which is the visible "window grows" jump on desktop↔window switch.
+            // Move/resize/chrome are blocked by WndProc while _windowLocked is true.
+            if (ResizeMode != ResizeMode.CanResize)
+            {
+                ResizeMode = ResizeMode.CanResize;
+            }
+
             if (locked && WindowState != WindowState.Normal)
             {
                 WindowState = WindowState.Normal;
@@ -455,12 +482,34 @@ public partial class MainWindow : Window
         const int scMaximize = 0xF030;
         const int scClose = 0xF060;
         const int scRestore = 0xF120;
-        const int htCaption = 2;
-        const int htLeft = 10;
-        const int htBottomRight = 17;
+        const int htCaption = Win32.HTCAPTION;
+        const int htLeft = Win32.HTLEFT;
+        const int htBottomRight = Win32.HTBOTTOMRIGHT;
 
         if (_windowLocked)
         {
+            // Keep ResizeMode.CanResize (avoids client-size jump) but treat the
+            // resize-grip band as client so the 8-way resize cursors never appear.
+            // (WPF supplies those hits itself — DefWindowProc alone is not enough.)
+            if (msg == Win32.WM_NCHITTEST && Win32.GetWindowRect(hwnd, out var ncRect))
+            {
+                var packed = lParam.ToInt64();
+                var x = (short)(packed & 0xFFFF);
+                var y = (short)((packed >> 16) & 0xFFFF);
+                var border = Math.Max(8, Win32.GetSystemMetrics(Win32.SM_CXFRAME)
+                    + Win32.GetSystemMetrics(Win32.SM_CXPADDEDBORDER));
+                var onResizeBand =
+                    x < ncRect.Left + border
+                    || x >= ncRect.Right - border
+                    || y < ncRect.Top + border
+                    || y >= ncRect.Bottom - border;
+                if (onResizeBand)
+                {
+                    handled = true;
+                    return new IntPtr(Win32.HTCLIENT);
+                }
+            }
+
             // Keep under other apps (unless quick-edit raised us). Refuse Win+D hide.
             if (msg == Win32.WM_WINDOWPOSCHANGING && lParam != IntPtr.Zero)
             {
@@ -668,6 +717,57 @@ public partial class MainWindow : Window
         _ = Win32.DwmSetWindowAttribute(hwnd, Win32.DWMWA_CLOAK, ref value, sizeof(int));
     }
 
+    /// <summary>
+    /// After the Chromium renderer dies, hide the black WebView surface and cloak the
+    /// WPF shell so wallpaper / desktop shows through (true per-pixel transparency while
+    /// WebView2 is alive is unreliable on many GPUs — see MainWindow.xaml comment).
+    /// </summary>
+    private void HideShellAfterWebViewProcessFailed()
+    {
+        try
+        {
+            WebView.Visibility = Visibility.Collapsed;
+            BootSplash.Visibility = Visibility.Collapsed;
+            ResizeGhost.Visibility = Visibility.Collapsed;
+            Background = System.Windows.Media.Brushes.Transparent;
+            if (Content is Grid root)
+            {
+                root.Background = System.Windows.Media.Brushes.Transparent;
+            }
+        }
+        catch
+        {
+            /* ignore */
+        }
+
+        try
+        {
+            var hwnd = _hwnd != IntPtr.Zero
+                ? _hwnd
+                : new WindowInteropHelper(this).Handle;
+            if (hwnd != IntPtr.Zero && Win32.IsWindow(hwnd))
+            {
+                var cloak = 1;
+                _ = Win32.DwmSetWindowAttribute(hwnd, Win32.DWMWA_CLOAK, ref cloak, sizeof(int));
+            }
+            else
+            {
+                Hide();
+            }
+        }
+        catch
+        {
+            try
+            {
+                Hide();
+            }
+            catch
+            {
+                /* ignore */
+            }
+        }
+    }
+
     private static void DisableAppDwmTransitions(IntPtr hwnd)
     {
         if (hwnd == IntPtr.Zero || !Win32.IsWindow(hwnd))
@@ -818,10 +918,16 @@ public partial class MainWindow : Window
             {
                 try
                 {
-                    Dispatcher.Invoke(() =>
+                    Dispatcher.BeginInvoke(() =>
                     {
+                        // Dead WebView2 HWND paints black. Collapse it and DWM-cloak the
+                        // shell so the desktop shows through instead of a black rectangle.
+                        // (Always-on Transparent DefaultBackgroundColor was tried before and
+                        // caused black gaps / white flashes during normal navigation.)
+                        HideShellAfterWebViewProcessFailed();
+
+                        // Ownerless — shell is cloaked; attaching to `this` can hide the dialog.
                         MessageBox.Show(
-                            this,
                             $"WebView2 프로세스 오류: {args.ProcessFailedKind}\n앱을 다시 실행해 주세요.",
                             AppConstants.AppTitle,
                             MessageBoxButton.OK,
@@ -1110,6 +1216,30 @@ public partial class MainWindow : Window
         menu.Items.Add(_trayStopServer);
         menu.Items.Add(new ToolStripSeparator());
 
+        menu.Items.Add("앞으로 가져오기", null, (_, _) => RunOnUi(() =>
+        {
+            // Desktop mode: raise above other apps so covered day cells can be double-clicked.
+            // Idle-caps back to always-on-bottom if no quick-edit keeps the raise alive.
+            if (_windowLocked)
+            {
+                _embed.BringToFrontFromTray();
+                return;
+            }
+
+            try
+            {
+                Activate();
+                var hwnd = new WindowInteropHelper(this).Handle;
+                if (hwnd != IntPtr.Zero)
+                {
+                    Win32.SetForegroundWindow(hwnd);
+                }
+            }
+            catch
+            {
+                /* ignore */
+            }
+        }));
         try
         {
             menu.ImageScalingSize = new System.Drawing.Size(16, 16);
@@ -1322,7 +1452,14 @@ public partial class MainWindow : Window
     {
         try
         {
-            var bounds = _embed.LockedBounds ?? CapturePhysicalBounds();
+            // Prefer the live window size so tray "바탕화면 모드" does not restore a
+            // larger LockedBounds from an earlier session.
+            var bounds = CapturePhysicalBounds() ?? _embed.LockedBounds;
+            if (bounds is null)
+            {
+                return;
+            }
+
             _ = EnterDesktopModeFromTrayAsync(bounds);
         }
         catch (Exception ex)
@@ -1436,6 +1573,8 @@ public partial class MainWindow : Window
     {
         if (!_windowLocked)
         {
+            // Window mode: ask Chromium to drop idle caches while minimized.
+            SetAppWebViewActive(WindowState != WindowState.Minimized);
             return;
         }
 
