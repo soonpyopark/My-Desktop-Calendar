@@ -423,13 +423,16 @@
   }
 
   .event-bar--middle {
-    left: -1px;
+    /* left was -1px — `.day-events` clips anything past its own edge (overflow: hidden),
+       so that shaved 1px off the 3px accent mark and made it look thinner than
+       start/single. left: 2px keeps the accent fully visible and pixel-identical. */
+    left: 2px;
     right: -1px;
     border-radius: 0;
   }
 
   .event-bar--end {
-    left: -1px;
+    left: 2px;
     right: 2px;
     border-radius: 0 4px 4px 0;
   }
@@ -442,10 +445,10 @@
     @apply shrink-0 self-stretch;
     width: 3px;
     background-color: var(--event-accent, #039be5);
-  }
-
-  .event-bar--single .event-bar-accent,
-  .event-bar--start .event-bar-accent {
+    /* Same rounded mark on every segment — continuation days (middle/end) used to render
+       a flat, unrounded sliver here so they'd visually "bridge" across the cell border.
+       Consistency with the start/single mark wins; the bar's own left/right offsets still
+       carry the continuation bridging. */
     border-radius: 2px 0 0 2px;
   }
 
