@@ -216,8 +216,8 @@ internal sealed class NativeBridge
     /// cloak AppWindow once it runs, silently hiding an already-open login dialog behind
     /// DesktopHost with no way for the user to see or dismiss it. MainWindow's boot sequence
     /// checks IsEmbedSuspended and skips the cloak (embeds Host but keeps App on top) when
-    /// this has been claimed. No-ops (returns false) once shell-parenting has already begun,
-    /// since the normal SuspendForUi path covers that case.
+    /// this has been claimed. No-ops once shell-parenting has already begun, or when boot
+    /// launch mode is window — claiming there falsely lights the desktop-mode toggle.
     /// </summary>
     public bool ClaimBootSuspendForAuth()
     {
@@ -228,10 +228,41 @@ internal sealed class NativeBridge
                 return false;
             }
 
+            // First-install / window-mode boot never runs EnterDesktopModeAsync — do not
+            // fake a desktop suspend (Header treats embedSuspended as "desktop active").
+            if (!IsPersistedLaunchModeDesktop())
+            {
+                return false;
+            }
+
             _surfaceState.Suspend(PendingAction.None);
             NotifyWidgetStatus();
             return true;
         });
+    }
+
+    private bool IsPersistedLaunchModeDesktop()
+    {
+        try
+        {
+            var widget = _store.ReadStore()["settings"]?["widget"]?.AsObject();
+            var mode = widget?["launchMode"]?.GetValue<string>();
+            if (string.Equals(mode, "desktop", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (string.Equals(mode, "window", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            return widget?["enabled"]?.GetValue<bool>() == true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>

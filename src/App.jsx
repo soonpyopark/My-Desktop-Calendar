@@ -1446,11 +1446,10 @@ export default function App() {
     };
 
     void (async () => {
-      // Native's own OnLoaded runs a deferred first desktop-embed ~400ms after window load
-      // (launchMode=desktop). Claim the suspend flag before that fires so it embeds Host
-      // without cloaking App out from under this just-opened dialog. If claim fails (embed
-      // already started elsewhere), fall back to polling + suspending after the fact —
-      // same safety net as clicking the header auth button while already embedded.
+      // When launchMode=desktop, OnLoaded deferred-embeds ~400ms after load. Claim suspend
+      // first so that embed keeps App visible under the login dialog. Window-mode boot
+      // (first install) no-ops the claim — otherwise the desktop toggle looks pressed.
+      // If claim fails (embed already started), poll + suspendDesktopEmbedForUi as fallback.
       try {
         const claim = await window.myCalendar?.claimBootSuspendForAuth?.();
         if (claim?.claimed || cancelled) return;
