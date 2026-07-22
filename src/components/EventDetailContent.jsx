@@ -8,7 +8,13 @@ import { openExternalUrl } from '../lib/openExternal.js';
 import { cn } from '../lib/cn.js';
 import EventTagIcons from './EventTagIcons.jsx';
 
-export default function EventDetailContent({ event, calendar, dayKey, tags = [] }) {
+export default function EventDetailContent({
+  event,
+  calendar,
+  dayKey,
+  tags = [],
+  onTitleDoubleClick,
+}) {
   const calendarColor = calendar?.color ?? event.color ?? '#039be5';
   const scheduleLine = formatEventPopoverSchedule(event, dayKey);
   const repeatLine = formatRepeatLabel(event);
@@ -19,6 +25,7 @@ export default function EventDetailContent({ event, calendar, dayKey, tags = [] 
   const completed = Boolean(event.completed);
   const title = event.title ?? '';
   const eventTags = resolveEventTags(event, tags);
+  const titleEditable = typeof onTitleDoubleClick === 'function';
 
   return (
     <>
@@ -32,7 +39,14 @@ export default function EventDetailContent({ event, calendar, dayKey, tags = [] 
             className={cn(
               'm-0 flex flex-wrap items-center gap-1.5 text-xl font-normal leading-snug text-gcal-heading',
               completed && 'line-through opacity-70',
+              titleEditable && 'cursor-pointer',
             )}
+            title={titleEditable ? '더블클릭하여 편집' : undefined}
+            onDoubleClick={titleEditable ? (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onTitleDoubleClick();
+            } : undefined}
           >
             {eventTags.length > 0 && (
               <EventTagIcons event={event} tags={tags} className="event-tag-icons--detail" />

@@ -129,7 +129,13 @@ export default function EventPopover({
         </div>
 
         <div className="settings-scroll min-h-0 flex-1 overflow-y-auto px-5 pb-5 pt-1">
-          <EventDetailContent event={event} calendar={calendar} dayKey={dayKey} tags={tags} />
+          <EventDetailContent
+            event={event}
+            calendar={calendar}
+            dayKey={dayKey}
+            tags={tags}
+            onTitleDoubleClick={canEdit && onEdit ? () => onEdit(event) : undefined}
+          />
         </div>
       </div>
     </div>
