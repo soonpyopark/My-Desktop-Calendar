@@ -1,6 +1,6 @@
 import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 
-export default function EventMoreButton({ count, lane, onClick, onDoubleClick, onMouseEnter, onMouseLeave }) {
+export default function EventMoreButton({ count, lane, onClick, onDoubleClick }) {
   const containerRef = useRef(null);
   const measureRef = useRef(null);
   const fullLabel = `${count}개 더보기`;
@@ -45,8 +45,6 @@ export default function EventMoreButton({ count, lane, onClick, onDoubleClick, o
       title={useShortLabel ? fullLabel : undefined}
       onClick={onClick}
       onDoubleClick={onDoubleClick}
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
     >
       <span ref={measureRef} className="event-more-measure" aria-hidden="true">
         {fullLabel}

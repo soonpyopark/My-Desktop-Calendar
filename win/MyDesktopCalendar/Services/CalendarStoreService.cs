@@ -743,6 +743,10 @@ internal sealed class CalendarStoreService
         {
             eventObject["sortOrder"] = ClampInt(GetDouble(payload, "sortOrder", 0), 0, 1_000_000);
         }
+        if (payload.ContainsKey("sortOrderByDay"))
+        {
+            eventObject["sortOrderByDay"] = NormalizeSortOrderByDay(payload["sortOrderByDay"]);
+        }
         NormalizeEventLinks(eventObject);
 
         var createdId = GetString(eventObject, "id");
@@ -816,6 +820,15 @@ internal sealed class CalendarStoreService
         if (safePayload.ContainsKey("links") || safePayload.ContainsKey("link"))
         {
             NormalizeEventLinks(merged);
+        }
+
+        if (safePayload.ContainsKey("sortOrderByDay"))
+        {
+            merged["sortOrderByDay"] = NormalizeSortOrderByDay(safePayload["sortOrderByDay"]);
+        }
+        else if (merged["sortOrderByDay"] is not null)
+        {
+            merged["sortOrderByDay"] = NormalizeSortOrderByDay(merged["sortOrderByDay"]);
         }
 
         events[index] = merged;
@@ -2681,6 +2694,33 @@ internal sealed class CalendarStoreService
     private static JsonObject CloneDetached(JsonObject obj) => (JsonObject)obj.DeepClone();
 
     private static int ClampInt(double value, int min, int max) => (int)Math.Clamp(Math.Round(value), min, max);
+
+    /// <summary>
+    /// Per-date-cell display order: <c>{ "yyyy-MM-dd": index }</c>. Independent across days
+    /// so multi-day events can be reordered in one cell without moving other cells.
+    /// </summary>
+    private static JsonObject NormalizeSortOrderByDay(JsonNode? node)
+    {
+        var result = new JsonObject();
+        if (node is not JsonObject map) return result;
+        foreach (var kv in map)
+        {
+            var key = (kv.Key ?? "").Trim();
+            if (key.Length != 10 || key[4] != '-' || key[7] != '-') continue;
+            if (kv.Value is not JsonValue jv) continue;
+            double number;
+            try
+            {
+                number = jv.GetValue<double>();
+            }
+            catch
+            {
+                continue;
+            }
+            result[key] = ClampInt(number, 0, 1_000_000);
+        }
+        return result;
+    }
 
     private static string NewId() => Guid.NewGuid().ToString();
 

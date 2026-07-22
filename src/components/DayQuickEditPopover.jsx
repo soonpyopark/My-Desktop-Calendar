@@ -395,7 +395,10 @@ export default function DayQuickEditPopover({
     next.splice(toIndex, 0, moved);
     setOrderOverride(next.map((event) => getSeriesId(event) || event.id));
     setSelectedEvent(moved);
-    void onReorderEvents?.(next.map((event, index) => ({ event, sortOrder: index })));
+    void onReorderEvents?.(
+      next.map((event, index) => ({ event, sortOrder: index })),
+      resolvedDayKey,
+    );
   };
 
   return (

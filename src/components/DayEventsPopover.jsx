@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { HOLIDAYS_KR_CALENDAR_ID } from '../../shared/constants.js';
 import { getSeriesId } from '../../shared/eventOccurrences.js';
-import { useEventHoverPreview } from '../hooks/useEventHoverPreview.js';
 import { formatEventBarLabel } from '../lib/eventFormat.js';
 import { formatDayHeaderTitle } from '../lib/dayHeaderFormat.js';
 import {
@@ -24,24 +23,12 @@ export default function DayEventsPopover({
   anchorRect,
   canEdit = false,
   onClose,
-  onEventClick,
-  onEventHover,
+  /** Single-click → read-only detail. */
   onEventDetail,
+  /** Double-click → full EventEditor. */
+  onEventEdit,
   onReorderEvents,
 }) {
-  const {
-    clearPreview: clearHoverPreview,
-    handleEventMouseEnter,
-    handleEventMouseMove,
-  } = useEventHoverPreview({
-    resetTimerOnMove: false,
-    onOpen: ({ event, clientX, clientY }) => {
-      // Same pointer anchor as single-click (not the list-row rect) so detail opens
-      // in the same place for hover and click.
-      (onEventHover ?? onEventDetail)?.(event, clientX, clientY, dayKey);
-    },
-  });
-
   const [orderOverride, setOrderOverride] = useState(null);
   const [dragSeriesId, setDragSeriesId] = useState(null);
   const [dropSeriesId, setDropSeriesId] = useState(null);
@@ -102,8 +89,7 @@ export default function DayEventsPopover({
   }, []);
 
   // Keep Escape handler on a ref so parent re-renders (new onClose identity) do not
-  // tear down this effect — the old cleanup used to clearHoverPreview() and cancel the
-  // 500ms list-row hover timer before detail could open.
+  // tear down this effect.
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
@@ -118,9 +104,8 @@ export default function DayEventsPopover({
   }, []);
 
   useEffect(() => () => {
-    clearHoverPreview();
     clearClickTimer();
-  }, [clearClickTimer, clearHoverPreview]);
+  }, [clearClickTimer]);
 
   const reorderMovable = (fromSeriesId, toSeriesId) => {
     if (!canEdit || !onReorderEvents || !fromSeriesId || !toSeriesId || fromSeriesId === toSeriesId) {
@@ -147,7 +132,10 @@ export default function DayEventsPopover({
     );
     const merged = [...holidays, ...next];
     setOrderOverride(merged.map((row) => getSeriesId(row.event) || row.event.id));
-    void onReorderEvents(next.map((row, index) => ({ event: row.event, sortOrder: index })));
+    void onReorderEvents(
+      next.map((row, index) => ({ event: row.event, sortOrder: index })),
+      dayKey,
+    );
   };
 
   if (!date || !anchorRect) return null;
@@ -175,7 +163,7 @@ export default function DayEventsPopover({
           </button>
         </div>
 
-        <ul className="settings-scroll min-h-0 flex-1 overflow-y-auto px-2 pb-3" onMouseLeave={clearHoverPreview}>
+        <ul className="settings-scroll min-h-0 flex-1 overflow-y-auto px-2 pb-3">
           {displayEvents.map(({ event, label }) => {
             const cal = calendars.find((c) => c.id === event.calendarId);
             const completed = Boolean(event.completed);
@@ -206,18 +194,9 @@ export default function DayEventsPopover({
                     completed && 'is-completed',
                     canDrag && 'is-draggable',
                   )}
-                  onMouseEnter={(e) => {
-                    if (dragSeriesId) return;
-                    handleEventMouseEnter(event, dayKey, e.currentTarget, e.clientX, e.clientY);
-                  }}
-                  onMouseMove={(e) => {
-                    if (dragSeriesId) return;
-                    handleEventMouseMove(e.clientX, e.clientY);
-                  }}
                   onDragStart={(e) => {
                     if (!canDrag) return;
                     clearClickTimer();
-                    clearHoverPreview();
                     suppressClickRef.current = false;
                     e.dataTransfer.effectAllowed = 'move';
                     e.dataTransfer.setData('text/plain', seriesId);
@@ -249,28 +228,51 @@ export default function DayEventsPopover({
                     reorderMovable(fromId, seriesId);
                   }}
                   onClick={(e) => {
+                    e.stopPropagation();
                     if (suppressClickRef.current) {
                       suppressClickRef.current = false;
                       return;
                     }
+                    // Click → detail (deferred so dblclick can cancel and open the editor).
                     const { clientX, clientY } = e;
+                    const rowRect = e.currentTarget.getBoundingClientRect();
                     clearClickTimer();
                     clickTimerRef.current = window.setTimeout(() => {
                       clickTimerRef.current = null;
-                      clearHoverPreview();
-                      (onEventDetail ?? onEventHover)?.(event, clientX, clientY, dayKey);
+                      onEventDetail?.(event, clientX, clientY, dayKey, {
+                        top: rowRect.top,
+                        left: rowRect.left,
+                        right: rowRect.right,
+                        bottom: rowRect.bottom,
+                        width: rowRect.width,
+                        height: rowRect.height,
+                        x: rowRect.x,
+                        y: rowRect.y,
+                      });
                     }, 250);
                   }}
                   onDoubleClick={(e) => {
                     e.preventDefault();
+                    e.stopPropagation();
                     clearClickTimer();
-                    clearHoverPreview();
-                    onEventClick?.(event, e.clientX, e.clientY, dayKey);
+                    if (event.calendarId === HOLIDAYS_KR_CALENDAR_ID) return;
+                    // Double-click → full EventEditor.
+                    onEventEdit?.(event, dayKey);
                   }}
                   onContextMenu={(e) => {
                     e.preventDefault();
-                    clearHoverPreview();
-                    (onEventDetail ?? onEventHover)?.(event, e.clientX, e.clientY, dayKey);
+                    e.stopPropagation();
+                    const rowRect = e.currentTarget.getBoundingClientRect();
+                    onEventDetail?.(event, e.clientX, e.clientY, dayKey, {
+                      top: rowRect.top,
+                      left: rowRect.left,
+                      right: rowRect.right,
+                      bottom: rowRect.bottom,
+                      width: rowRect.width,
+                      height: rowRect.height,
+                      x: rowRect.x,
+                      y: rowRect.y,
+                    });
                   }}
                 >
                   <EventAccentGlyph shapeId={event.markerShape} color={color} variant="dot" className="shrink-0" />

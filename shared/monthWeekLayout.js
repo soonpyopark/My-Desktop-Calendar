@@ -1,4 +1,8 @@
-import { formatEventBarLabelForDay, compareEventsForDisplay } from './eventBarFormat.js';
+import {
+  formatEventBarLabelForDay,
+  compareEventsForDisplay,
+  compareEventsForDayDisplay,
+} from './eventBarFormat.js';
 import { expandEventsForRange } from './eventOccurrences.js';
 
 /**
@@ -34,44 +38,27 @@ function getEventSegmentType(event, dayKey) {
 }
 
 /**
+ * Per-day lanes: continuous events may sit at different vertical positions on
+ * different days so date-cell reorder stays independent.
+ *
  * @param {{ date: Date }[]} week
- * @param {object[]} weekEvents Already expanded + sorted for this week (or a superset filtered to it)
+ * @param {object[]} weekEvents Already expanded for this week (or a superset filtered to it)
  * @param {object[]} [tags]
  */
 function layoutWeekFromEvents(week, weekEvents, tags) {
   const dayKeys = week.map(({ date }) => toDateKey(date));
 
-  /** @type {Map<string, Set<number>>} */
-  const occupiedByDay = new Map(dayKeys.map((dayKey) => [dayKey, new Set()]));
-  /** @type {Map<string, number>} */
-  const laneByEventId = new Map();
-
-  for (const event of weekEvents) {
-    const daysInWeek = dayKeys.filter((dayKey) => eventOnDay(event, dayKey));
-    let lane = 0;
-
-    while (daysInWeek.some((dayKey) => occupiedByDay.get(dayKey)?.has(lane))) {
-      lane += 1;
-    }
-
-    laneByEventId.set(event.id, lane);
-    for (const dayKey of daysInWeek) {
-      occupiedByDay.get(dayKey)?.add(lane);
-    }
-  }
-
   /** @type {Record<string, object[]>} */
   const layoutByDay = Object.fromEntries(dayKeys.map((dayKey) => [dayKey, []]));
 
-  for (const event of weekEvents) {
-    const lane = laneByEventId.get(event.id) ?? 0;
+  for (const dayKey of dayKeys) {
+    const dayEvents = weekEvents
+      .filter((event) => eventOnDay(event, dayKey))
+      .sort((a, b) => compareEventsForDayDisplay(a, b, dayKey));
 
-    for (const dayKey of dayKeys) {
-      if (!eventOnDay(event, dayKey)) continue;
-
+    dayEvents.forEach((event, lane) => {
       const segment = getEventSegmentType(event, dayKey);
-      if (!segment) continue;
-
+      if (!segment) return;
       layoutByDay[dayKey].push({
         event,
         segment,
@@ -79,11 +66,7 @@ function layoutWeekFromEvents(week, weekEvents, tags) {
         label: formatEventBarLabelForDay(event, dayKey, tags),
         continuation: segment === 'middle' || segment === 'end',
       });
-    }
-  }
-
-  for (const dayKey of dayKeys) {
-    layoutByDay[dayKey].sort((a, b) => a.lane - b.lane);
+    });
   }
 
   return layoutByDay;

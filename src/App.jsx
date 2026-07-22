@@ -36,6 +36,10 @@ import {
   isRecurringEvent,
   truncateSeriesBefore,
 } from '../shared/eventOccurrences.js';
+import {
+  getEventSortOrderForDay,
+  mergeSortOrderByDay,
+} from '../shared/eventBarFormat.js';
 import { addDays, toDateKey } from './lib/calendarUtils.js';
 import { getWeekStartsOn } from './lib/viewOptions.js';
 import {
@@ -685,17 +689,23 @@ export default function App() {
     return (store?.events ?? []).find((item) => item.id === seriesId) ?? null;
   }, [store?.events]);
 
-  const handleReorderEvents = useCallback(async (ordered) => {
+  const handleReorderEvents = useCallback(async (ordered, dayKey) => {
     if (!isLoggedIn) {
       await alert('관리자 로그인 후 일정 순서를 변경할 수 있습니다.');
+      return;
+    }
+    if (!dayKey) {
+      await alert('일정 순서를 저장하지 못했습니다.');
       return;
     }
     try {
       for (const { event, sortOrder } of ordered ?? []) {
         const master = findMasterEvent(event);
         if (!master || master.calendarId === HOLIDAYS_KR_CALENDAR_ID) continue;
-        if (master.sortOrder === sortOrder) continue;
-        await editEvent(master.id, { sortOrder });
+        if (getEventSortOrderForDay(master, dayKey) === sortOrder) continue;
+        await editEvent(master.id, {
+          sortOrderByDay: mergeSortOrderByDay(master, dayKey, sortOrder),
+        });
       }
     } catch (err) {
       await alert(err instanceof Error ? err.message : '일정 순서를 저장하지 못했습니다.');
@@ -1589,24 +1599,19 @@ export default function App() {
             onDayQuickEdit={openDayQuickEdit}
             onCreateDate={(date) => openDayQuickEditForDate(date)}
             onEventClick={(event, _clientX, _clientY, dayKey) => {
-              // Window: bar single-click → quick-edit. Desktop locked: MonthView no-ops first.
+              // Month grid bars no longer single-click open QE (window = desktop).
+              // Kept for any remaining list / legacy callers.
               if (isDesktopSurfaceHost()) return;
               openDayQuickEditForEvent(event, dayKey);
             }}
-            onEventHover={(event, clientX, clientY, dayKey, anchorRect) => {
-              // Schedule-bar / 더보기-list hover → read-only detail (in-place).
-              if (!isEventVisibleToViewer(event, calendars, false)) return;
-              if (quickEdit || editorOpen) return;
-              openEventDetail(event, dayKey, anchorRect ?? { x: clientX, y: clientY });
-            }}
             onEventDetail={(event, clientX, clientY, dayKey, anchorRect) => {
-              // Right-click / list click → read-only detail (in-place).
+              // Bar / list click (or context menu) → read-only detail (in-place).
               if (!isEventVisibleToViewer(event, calendars, false)) return;
               if (quickEdit || editorOpen) return;
               openEventDetail(event, dayKey, anchorRect ?? { x: clientX, y: clientY });
             }}
             onCloseEventDetail={() => {
-              // "더보기" hover takes over — close bar detail so the day list can open cleanly.
+              // "더보기" list opening — close bar detail so the day list can open cleanly.
               clearEventDetail();
             }}
             onEventEdit={(event, dayKey) => {

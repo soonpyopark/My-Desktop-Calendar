@@ -79,7 +79,7 @@ export function isEventContinuingOnDay(event, dayKey) {
 }
 
 /**
- * Manual display order from quick-edit drag-and-drop (lower = higher in the list).
+ * Global manual display order (legacy / fallback).
  * @param {object} event
  * @returns {number | null}
  */
@@ -89,13 +89,42 @@ export function getEventSortOrder(event) {
 }
 
 /**
+ * Per-day order from date-cell DnD. Falls back to global sortOrder when unset for that day.
+ * @param {object} event
+ * @param {string} [dayKey]
+ * @returns {number | null}
+ */
+export function getEventSortOrderForDay(event, dayKey) {
+  if (dayKey && event?.sortOrderByDay && typeof event.sortOrderByDay === 'object') {
+    const value = event.sortOrderByDay[dayKey];
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+  }
+  return getEventSortOrder(event);
+}
+
+/**
+ * @param {object} event
+ * @param {string} dayKey
+ * @param {number} sortOrder
+ * @returns {Record<string, number>}
+ */
+export function mergeSortOrderByDay(event, dayKey, sortOrder) {
+  const prev = event?.sortOrderByDay && typeof event.sortOrderByDay === 'object'
+    ? { ...event.sortOrderByDay }
+    : {};
+  prev[dayKey] = sortOrder;
+  return prev;
+}
+
+/**
  * @param {object} a
  * @param {object} b
+ * @param {string} [dayKey]
  * @returns {number | null} null when neither side has a manual order
  */
-function compareBySortOrder(a, b) {
-  const orderA = getEventSortOrder(a);
-  const orderB = getEventSortOrder(b);
+function compareBySortOrder(a, b, dayKey) {
+  const orderA = dayKey ? getEventSortOrderForDay(a, dayKey) : getEventSortOrder(a);
+  const orderB = dayKey ? getEventSortOrderForDay(b, dayKey) : getEventSortOrder(b);
   if (orderA == null && orderB == null) return null;
   if (orderA == null) return 1;
   if (orderB == null) return -1;
@@ -154,8 +183,8 @@ export function compareEventsForDayDisplay(a, b, dayKey) {
   const holidayB = b.calendarId === HOLIDAYS_KR_CALENDAR_ID;
   if (holidayA !== holidayB) return holidayA ? -1 : 1;
 
-  // Manual order from quick-edit DnD wins over continuing / time heuristics.
-  const byOrder = compareBySortOrder(a, b);
+  // Per-day DnD order (sortOrderByDay) — independent across date cells.
+  const byOrder = compareBySortOrder(a, b, dayKey);
   if (byOrder != null && byOrder !== 0) return byOrder;
 
   const continuingA = isEventContinuingOnDay(a, dayKey);

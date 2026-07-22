@@ -28,18 +28,15 @@ export default function EventPopover({
   const resolvedAnchor = resolvePopoverAnchor(anchorRect);
   const { ref, style: anchoredStyle } = useAnchoredPopoverStyle(anchorRect, popoverOptions);
 
-  // Backdrop stays click-through (see below) so hovering a different event bar underneath can
-  // swap this popover to that event instead of requiring an explicit close first. Outside clicks
-  // still close it via this document-level listener (capture phase — runs before any bar's own
-  // stopPropagation()).
+  // Backdrop stays click-through so clicking a different event bar underneath can swap this
+  // popover. Outside clicks still close it via this document-level listener (capture phase).
   useEffect(() => {
     if (!event) return undefined;
     const handlePointerDown = (e) => {
       const target = e.target;
       if (!(target instanceof Node)) return;
       if (ref.current?.contains(target)) return;
-      // Keep detail open while interacting with the day "더보기" list — row hover/click
-      // swaps the shown event instead of dismissing the panel.
+      // Keep detail open while interacting with the day "더보기" list — row click swaps event.
       if (target instanceof Element && target.closest('.day-events-popover')) return;
       onClose();
     };

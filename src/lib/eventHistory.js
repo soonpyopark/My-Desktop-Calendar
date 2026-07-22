@@ -36,6 +36,9 @@ export function eventToMutationPayload(event) {
     sortOrder: typeof event.sortOrder === 'number' && Number.isFinite(event.sortOrder)
       ? event.sortOrder
       : null,
+    sortOrderByDay: event.sortOrderByDay && typeof event.sortOrderByDay === 'object'
+      ? { ...event.sortOrderByDay }
+      : undefined,
   };
 }
 

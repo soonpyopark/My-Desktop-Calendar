@@ -426,6 +426,7 @@ export function buildSingleExceptionEvent(master, patch, occurrenceDate) {
       : (Array.isArray(master.links) ? master.links : undefined),
     link: patch.link ?? master.link ?? '',
     sortOrder: patch.sortOrder ?? master.sortOrder ?? null,
+    sortOrderByDay: patch.sortOrderByDay ?? master.sortOrderByDay ?? undefined,
   };
 }
 
@@ -461,5 +462,6 @@ export function buildFollowingSeriesEvent(master, patch, occurrenceDate) {
       : (Array.isArray(master.links) ? master.links : undefined),
     link: patch.link ?? master.link ?? '',
     sortOrder: patch.sortOrder ?? master.sortOrder ?? null,
+    sortOrderByDay: patch.sortOrderByDay ?? master.sortOrderByDay ?? undefined,
   };
 }
