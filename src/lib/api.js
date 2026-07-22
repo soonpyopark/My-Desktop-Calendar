@@ -115,6 +115,22 @@ export async function importStore(payload) {
   return request('/api/store/import', { method: 'POST', body: JSON.stringify(payload) });
 }
 
+/** Desktop only: SaveFileDialog → ZIP (store.json + attachments/). */
+export async function exportBackupZip() {
+  return request('/api/store/export-backup-zip', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+/** Desktop only: OpenFileDialog → restore store + attachment files. */
+export async function importBackupZip() {
+  return request('/api/store/import-backup-zip', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
 export async function patchCalendar(id, payload) {
   return request(`/api/calendars/${encodeURIComponent(id)}`, {
     method: 'PATCH',

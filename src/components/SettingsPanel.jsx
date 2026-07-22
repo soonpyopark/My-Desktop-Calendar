@@ -34,6 +34,7 @@ import {
   securitySettingsExportFilename,
 } from '../../shared/securitySettingsIo.js';
 import { isNativeHost } from '../lib/nativeHost.js';
+import { exportBackupZip, importBackupZip } from '../lib/api.js';
 
 const fieldBoxClass =
   'rounded-lg border border-gcal-border bg-gcal-input px-4 py-3 focus-within:border-gcal-blue focus-within:ring-2 focus-within:ring-gcal-blue/15';
@@ -1827,9 +1828,11 @@ function CalendarSettingsPanel({
 }
 
 function ImportExportPanel({ store, onImport }) {
-  const { alert } = useAppDialog();
+  const { alert, confirm } = useAppDialog();
   const importInputRef = useRef(null);
   const [statusMessage, setStatusMessage] = useState('');
+  const [zipBusy, setZipBusy] = useState(false);
+  const nativeHost = isNativeHost();
 
   const handleExport = async (format) => {
     try {
@@ -1841,6 +1844,26 @@ function ImportExportPanel({ store, onImport }) {
     } catch (err) {
       setStatusMessage('');
       await alert(err instanceof Error ? err.message : '내보내기에 실패했습니다.');
+    }
+  };
+
+  const handleExportBackupZip = async () => {
+    if (!nativeHost || zipBusy) return;
+    setZipBusy(true);
+    try {
+      const result = await exportBackupZip();
+      if (result?.cancelled) return;
+      const files = Number(result?.attachmentFiles) || 0;
+      const message = files > 0
+        ? `일정과 첨부 파일 ${files}개를 ZIP으로 저장했습니다.`
+        : '일정을 ZIP으로 저장했습니다. (포함된 첨부 파일 없음)';
+      setStatusMessage(message);
+      await alert(message, { title: '내보내기 완료' });
+    } catch (err) {
+      setStatusMessage('');
+      await alert(err instanceof Error ? err.message : 'ZIP 내보내기에 실패했습니다.');
+    } finally {
+      setZipBusy(false);
     }
   };
 
@@ -1876,6 +1899,32 @@ function ImportExportPanel({ store, onImport }) {
     }
   };
 
+  const handleImportBackupZip = async () => {
+    if (!nativeHost || zipBusy) return;
+    const ok = await confirm(
+      'ZIP 백업의 일정·설정·첨부 파일로 현재 데이터를 바꿉니다.\n「대한민국의 휴일」은 유지됩니다. 계속할까요?',
+      { confirmLabel: '가져오기' },
+    );
+    if (!ok) return;
+
+    setZipBusy(true);
+    try {
+      const result = await importBackupZip();
+      if (result?.cancelled) return;
+      const files = Number(result?.attachmentFiles) || 0;
+      const message = files > 0
+        ? `ZIP 백업을 가져왔습니다. 첨부 파일 ${files}개를 복원했습니다.`
+        : 'ZIP 백업을 가져왔습니다.';
+      setStatusMessage(message);
+      await alert(message, { title: '가져오기 완료' });
+    } catch (err) {
+      setStatusMessage('');
+      await alert(err instanceof Error ? err.message : 'ZIP 가져오기에 실패했습니다.');
+    } finally {
+      setZipBusy(false);
+    }
+  };
+
   return (
     <div className="w-full max-w-full text-left">
       <h2 className="mb-8 text-[22px] font-normal text-gcal-heading">가져오기 / 내보내기</h2>
@@ -1886,13 +1935,25 @@ function ImportExportPanel({ store, onImport }) {
             JSON, ICS, CSV 파일을 불러옵니다. JSON 전체 내보내기·개별 캘린더 파일과 ICS/CSV는 기존 데이터에
             병합됩니다. 「대한민국의 휴일」은 동기화로만 갱신되며 가져오기로 덮어쓰지 않습니다.
           </p>
-          <button
-            type="button"
-            className="rounded-full bg-gcal-blue px-5 py-2 text-sm font-medium text-white hover:bg-[#1765cc]"
-            onClick={openImportPicker}
-          >
-            파일 선택
-          </button>
+          <div className="flex flex-wrap gap-3">
+            <button
+              type="button"
+              className="rounded-full bg-gcal-blue px-5 py-2 text-sm font-medium text-white hover:bg-[#1765cc]"
+              onClick={openImportPicker}
+            >
+              파일 선택
+            </button>
+            {nativeHost && (
+              <button
+                type="button"
+                disabled={zipBusy}
+                className="rounded-full border border-gcal-border bg-gcal-page px-5 py-2 text-sm font-medium text-gcal-heading hover:bg-gcal-surface-2 disabled:opacity-60"
+                onClick={() => void handleImportBackupZip()}
+              >
+                {zipBusy ? '처리 중…' : 'ZIP 백업 가져오기'}
+              </button>
+            )}
+          </div>
           <input
             ref={importInputRef}
             type="file"
@@ -1905,8 +1966,21 @@ function ImportExportPanel({ store, onImport }) {
           <h3 className="mb-2 text-base font-medium text-gcal-heading">내보내기</h3>
           <p className="mb-4 text-sm text-gcal-muted">
             모든 캘린더와 일정을 JSON, ICS, CSV 형식으로 저장합니다.
+            {nativeHost ? ' 첨부 파일까지 백업하려면 ZIP을 사용하세요.' : ''}
           </p>
-          <CalendarFileFormatButton label="내보내기" mode="export" onSelectFormat={(format) => void handleExport(format)} />
+          <div className="flex flex-wrap items-center gap-3">
+            <CalendarFileFormatButton label="내보내기" mode="export" onSelectFormat={(format) => void handleExport(format)} />
+            {nativeHost && (
+              <button
+                type="button"
+                disabled={zipBusy}
+                className="rounded-full border border-gcal-border bg-gcal-page px-5 py-2 text-sm font-medium text-gcal-heading hover:bg-gcal-surface-2 disabled:opacity-60"
+                onClick={() => void handleExportBackupZip()}
+              >
+                {zipBusy ? '처리 중…' : '일정 + 첨부 (ZIP)'}
+              </button>
+            )}
+          </div>
         </div>
         {statusMessage ? (
           <p className="rounded-lg border border-[#ceead6] bg-[#e6f4ea] px-4 py-3 text-sm text-[#137333]">
@@ -1920,8 +1994,16 @@ function ImportExportPanel({ store, onImport }) {
               <span className="font-medium text-gcal-heading">JSON</span>
               {' '}
               — 이 앱 전용 백업 형식입니다. 캘린더·일정·설정을 그대로 저장하고, 나중에 이 앱에서
-              다시 불러올 수 있습니다.
+              다시 불러올 수 있습니다. 첨부 파일 본체는 포함되지 않습니다.
             </p>
+            {nativeHost && (
+              <p>
+                <span className="font-medium text-gcal-heading">ZIP</span>
+                {' '}
+                — 일정 데이터(JSON)와 첨부 파일을 함께 담는 전체 백업입니다. 데스크톱 앱에서만
+                내보내고 가져올 수 있습니다.
+              </p>
+            )}
             <p>
               <span className="font-medium text-gcal-heading">ICS</span>
               {' '}

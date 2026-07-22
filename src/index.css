@@ -334,7 +334,7 @@
     font-size: clamp(9px, 1.3vh, 11px);
   }
 
-  /** 24절기(예: 춘분) — 연한 빨강. (다른 달 셀은 위 .other-month 규칙이 흐리게 덮어씀) */
+  /** 24절기·삼복(예: 춘분, 초복) — 연한 빨강. (다른 달 셀은 위 .other-month 규칙이 흐리게 덮어씀) */
   .day-number .solar-term {
     @apply leading-none;
     font-size: clamp(9px, 1.3vh, 11px);

@@ -445,15 +445,17 @@ export default function App() {
       return;
     }
     if (mode === 'week') {
-      // Month → week: open today's week. Align target must be 'today' — 'month'
-      // scrolls to day-1 of displayMonth and overrides the today anchor.
-      const today = new Date();
-      const anchor = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      // Month/year → week: show the week that contains the focused (selected) day.
+      // Align target must be 'selected' — 'month' scrolls to day-1 of the month.
+      const anchor = new Date(
+        selectedDate.getFullYear(),
+        selectedDate.getMonth(),
+        selectedDate.getDate(),
+      );
       setViewDate(anchor);
-      setSelectedDate(anchor);
-      requestMonthAlign('today');
+      requestMonthAlign('selected');
     }
-  }, [requestMonthAlign]);
+  }, [requestMonthAlign, selectedDate]);
 
   const openMonthView = useCallback((date) => {
     setViewDate(new Date(date.getFullYear(), date.getMonth(), 1));

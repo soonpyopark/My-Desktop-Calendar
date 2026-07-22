@@ -1,4 +1,5 @@
 import { toLunar } from 'kor-lunar';
+import { getSambokLabel } from './sambok.js';
 import { getSolarTermLabel } from './solarTerms.js';
 
 /** Soft cap so long sessions cannot grow these maps without bound. */
@@ -78,11 +79,15 @@ export function formatLunarDayLabel(lunar) {
  */
 function computeDayParts(year, month, day) {
   const lunar = getLunarInfo(year, month, day);
+  const term = getSolarTermLabel(year, month, day);
+  const sambok = getSambokLabel(year, month, day);
+  // Same day almost never has both; join if it does.
+  const solarTerm = [term, sambok].filter(Boolean).join(' ') || null;
   return {
     solar: day,
     lunar: formatLunarDayLabel(lunar),
     lunarDay: lunar.day || null,
-    solarTerm: getSolarTermLabel(year, month, day),
+    solarTerm,
   };
 }
 

@@ -31,6 +31,7 @@ internal sealed class NativeBridge
     private readonly UndockZoneMonitor _undockZones;
     private readonly Window _window;
     private readonly EventAttachmentService _attachments;
+    private readonly BackupZipService _backupZip;
     private DesktopSurfaceController? _surfaces;
     private WebView2? _webView;
     private string? _currentToken;
@@ -57,6 +58,7 @@ internal sealed class NativeBridge
         _undockZones = undockZones;
         _window = window;
         _attachments = new EventAttachmentService(store);
+        _backupZip = new BackupZipService(store);
         _store.StoreChanged += OnStoreChanged;
         _store.AttachmentFilesDeleted += ids => _attachments.DeleteAllForEvents(ids);
     }
@@ -1029,6 +1031,30 @@ internal sealed class NativeBridge
             return _store.ImportStore(body);
         }
 
+        // POST /api/store/export-backup-zip — SaveFileDialog + ZIP (store.json + attachments/)
+        if (path == "/api/store/export-backup-zip" && method == "POST")
+        {
+            RequireSuperAdmin(token);
+            if (!fromNativeShell)
+            {
+                throw new UnauthorizedAccessException("첨부 포함 백업은 데스크톱 앱에서만 가능합니다.");
+            }
+
+            return _backupZip.ExportWithDialog(ResolvePickerOwner());
+        }
+
+        // POST /api/store/import-backup-zip — OpenFileDialog + restore store + attachment files
+        if (path == "/api/store/import-backup-zip" && method == "POST")
+        {
+            RequireSuperAdmin(token);
+            if (!fromNativeShell)
+            {
+                throw new UnauthorizedAccessException("첨부 포함 백업 가져오기는 데스크톱 앱에서만 가능합니다.");
+            }
+
+            return _backupZip.ImportWithDialog(ResolvePickerOwner());
+        }
+
         if (path == "/api/holidays/sync" && method == "POST")
         {
             RequireSuperAdmin(token);
@@ -1852,6 +1878,8 @@ internal sealed class NativeBridge
         if (path.StartsWith("/api/window/", StringComparison.Ordinal)) return true;
         if (path.StartsWith("/api/desktop/", StringComparison.Ordinal)) return true;
         if (string.Equals(path, "/api/app/shutdown", StringComparison.Ordinal)) return true;
+        if (string.Equals(path, "/api/store/export-backup-zip", StringComparison.Ordinal)) return true;
+        if (string.Equals(path, "/api/store/import-backup-zip", StringComparison.Ordinal)) return true;
         return false;
     }
 

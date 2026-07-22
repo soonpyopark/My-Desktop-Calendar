@@ -574,6 +574,12 @@ export default function MonthView({
       return;
     }
 
+    if (target === 'selected') {
+      // Week-view entry from month/year: land on the focused day cell's week.
+      scrollToDateInViewportRef.current(selectedDate, 0, behavior);
+      return;
+    }
+
     // Chrome prev/next/year updates viewDate to day-1 of the target period. Aligning to
     // selectedDate here used to yank scroll (and reportVisibleMonth) back to whatever
     // day was last clicked — often a different month/year after rapid year navigation.
@@ -584,6 +590,10 @@ export default function MonthView({
     );
   };
 
+  const weekAlignTarget = (target) => (
+    !isFullMonthView && (target === 'today' || target === 'selected') ? target : 'month'
+  );
+
   useLayoutEffect(() => {
     const monthKey = `${displayYear}-${displayMonth}`;
     const weeksCountChanged = prevWeeksInViewportRef.current !== effectiveWeeksInViewport;
@@ -591,7 +601,7 @@ export default function MonthView({
 
     if (!hasInitialScrollRef.current) {
       hasInitialScrollRef.current = true;
-      runViewportAlign(monthAlign.target === 'today' && !isFullMonthView ? 'today' : 'month', 'auto');
+      runViewportAlign(weekAlignTarget(monthAlign.target), 'auto');
       prevViewMonthRef.current = monthKey;
       return;
     }
@@ -647,10 +657,7 @@ export default function MonthView({
     const realignIfRestored = () => {
       const collapsed = body.clientHeight < 8;
       if (wasCollapsed && !collapsed) {
-        runViewportAlign(
-          monthAlign.target === 'today' && !isFullMonthView ? 'today' : 'month',
-          'auto',
-        );
+        runViewportAlign(weekAlignTarget(monthAlign.target), 'auto');
       }
       wasCollapsed = collapsed;
     };
