@@ -28,6 +28,8 @@ export function useMonthWeekScroll({
   const weekRefs = useRef(new Map());
   const skipNextScrollRef = useRef(false);
   const aligningRef = useRef(false);
+  /** Bumps on every programmatic align so a stale finishAlign cannot overwrite a newer nav. */
+  const alignSeqRef = useRef(0);
   const rafRef = useRef(0);
   const wheelLockRef = useRef(false);
   const onVisibleMonthChangeRef = useRef(onVisibleMonthChange);
@@ -367,14 +369,25 @@ export function useMonthWeekScroll({
       weekIndex = findWeekIndexByStartKey(toDateKey(weekStart));
     }
 
-    if (weekIndex < 0) return;
+    if (weekIndex < 0) {
+      // Should be rare now that MonthView recenters the week buffer in the same render
+      // as viewDate. Still publish the requested month so a missing row cannot leave the
+      // header on a stale scroll-derived period.
+      skipNextScrollRef.current = true;
+      onVisibleMonthChangeRef.current?.(year, monthIndex + 1);
+      return;
+    }
 
+    const seq = ++alignSeqRef.current;
     skipNextScrollRef.current = true;
     aligningRef.current = true;
 
     let attempts = 0;
 
     const finishAlign = () => {
+      // A newer prev/next/year click started another align — drop this stale finish.
+      if (seq !== alignSeqRef.current) return;
+
       const visibleIndex = getFirstVisibleWeekIndex();
 
       if (visibleIndex >= 0
@@ -383,14 +396,24 @@ export function useMonthWeekScroll({
         scrollToWeekIndex(weekIndex, 'auto');
       }
 
+      if (seq !== alignSeqRef.current) return;
+
       aligningRef.current = false;
       // Only publish month when layout is usable — avoids jumping to range start (week 0).
-      if (getFirstVisibleWeekIndex() >= 0) {
-        reportVisibleMonth();
+      // Prefer the align *target* when day-1 is in view so a mis-read first-visible week
+      // (or a race with an older align) cannot overwrite chrome-nav viewDate.
+      const landed = getFirstVisibleWeekIndex();
+      if (landed < 0) return;
+      if (weekContainsMonthDay(landed, year, monthIndex, 1)) {
+        skipNextScrollRef.current = true;
+        onVisibleMonthChangeRef.current?.(year, monthIndex + 1);
+        return;
       }
+      reportVisibleMonth();
     };
 
     const runScroll = () => {
+      if (seq !== alignSeqRef.current) return;
       attempts += 1;
       const scrolled = scrollToWeekIndex(weekIndex, behavior);
 
@@ -439,6 +462,7 @@ export function useMonthWeekScroll({
     if (weekIndex < 0) return;
 
     const targetIndex = Math.max(0, Math.min(weeks.length - 1, weekIndex - leadingWeeks));
+    const seq = ++alignSeqRef.current;
 
     // Guard like scrollToMonth: without this, a trailing native 'scroll' event from a
     // *previous* rapid nav click can fire reportVisibleMonth mid-align and briefly
@@ -448,6 +472,7 @@ export function useMonthWeekScroll({
     aligningRef.current = true;
 
     const finishAlign = () => {
+      if (seq !== alignSeqRef.current) return;
       aligningRef.current = false;
       if (getFirstVisibleWeekIndex() >= 0) {
         reportVisibleMonth();
@@ -461,6 +486,7 @@ export function useMonthWeekScroll({
 
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
+        if (seq !== alignSeqRef.current) return;
         scrollToWeekIndex(targetIndex, behavior);
         requestAnimationFrame(finishAlign);
       });

@@ -4,7 +4,7 @@ export const DEFAULT_PORT = 3010;
 import { CALENDAR_COLOR_PALETTE } from './calendarColorPalette.js';
 
 /** Application display version. */
-export const APP_VERSION = '1.1.8';
+export const APP_VERSION = '1.1.9';
 
 /** Application display name. */
 export const APP_NAME = 'My Desktop Calendar';
@@ -137,15 +137,17 @@ export const DEFAULT_DESKTOP_WIDGET_MARGINS = {
   bottom: 0.05,
 };
 
-/** WorkerW desktop widget defaults. Step 3: set launchMode or MYCALENDAR_DESKTOP_BACKGROUND=1 */
+/** Desktop widget defaults. First run = window; later runs restore last quit mode. */
 export const WIDGET_LAUNCH_MODE = {
   WINDOW: 'window',
   DESKTOP: 'desktop',
 };
 
 export const DEFAULT_WIDGET_SETTINGS = {
-  launchMode: WIDGET_LAUNCH_MODE.DESKTOP,
-  enabled: true,
+  // First install / first run opens in window mode; subsequent launches restore
+  // whatever mode the user last quit in (persisted by the native shell).
+  launchMode: WIDGET_LAUNCH_MODE.WINDOW,
+  enabled: false,
   alwaysOnTop: false,
   /** Unused — both modes use the in-app custom title bar (kept for settings compat). */
   chromeTopInset: 0,

@@ -1,6 +1,6 @@
 # My Desktop Calendar — Windows Native (WPF)
 
-이 폴더는 **단일 HWND** Windows 전용 셸입니다. (앱 버전: v1.1.8)
+이 폴더는 **단일 HWND** Windows 전용 셸입니다. (앱 버전: v1.1.9)
 
 ## 모드 전환: 잠금 vs 창
 

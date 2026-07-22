@@ -204,14 +204,15 @@ public partial class MainWindow : Window
             RememberWindowBoundsIfNeeded();
             var bounds = DesktopEmbedService.SnapBoundsDownTo5(
                 _embed.LockedBounds ?? CapturePhysicalBounds());
-            // Always reboot into desktop (locked) mode; window mode is in-session only.
-            // Persist the user's last size/position for the next launch.
+            // Remember the mode the user is actually in (desktop lock vs window), not a
+            // forced default — first install seeds window; subsequent boots restore this.
+            var desktop = _windowLocked || _embed.IsShellParented;
             _store.PatchSettings(new JsonObject
             {
                 ["widget"] = new JsonObject
                 {
-                    ["launchMode"] = "desktop",
-                    ["enabled"] = true,
+                    ["launchMode"] = desktop ? "desktop" : "window",
+                    ["enabled"] = desktop,
                     ["bounds"] = new JsonObject
                     {
                         ["x"] = bounds.X,
@@ -226,6 +227,37 @@ public partial class MainWindow : Window
         {
             /* ignore */
         }
+    }
+
+    /// <summary>Last-quit launch mode from settings (default window for first install).</summary>
+    private string ReadPersistedLaunchMode()
+    {
+        try
+        {
+            var widget = _store.ReadStore()["settings"]?["widget"]?.AsObject();
+            var mode = widget?["launchMode"]?.GetValue<string>();
+            if (string.Equals(mode, "desktop", StringComparison.OrdinalIgnoreCase))
+            {
+                return "desktop";
+            }
+
+            if (string.Equals(mode, "window", StringComparison.OrdinalIgnoreCase))
+            {
+                return "window";
+            }
+
+            // Legacy: enabled:true meant desktop before launchMode existed.
+            if (widget?["enabled"]?.GetValue<bool>() == true)
+            {
+                return "desktop";
+            }
+        }
+        catch
+        {
+            /* fall through */
+        }
+
+        return "window";
     }
 
     private void RestoreWindowSession()
@@ -690,8 +722,8 @@ public partial class MainWindow : Window
     private void OnSourceInitialized(object? sender, EventArgs e)
     {
         _hwnd = new WindowInteropHelper(this).Handle;
-        // Cloak before first paint so boot does not flash unlocked chrome, then enter
-        // locked desktop mode (or window mode if that fails).
+        // Cloak before first paint so boot does not flash the wrong chrome; OnLoaded
+        // then restores window or desktop mode from the last quit (or window on first run).
         CloakAppWindowAtBoot(_hwnd);
         _surfaces.MarkAppCloakedAtBoot();
         ApplyNativeWindowIcons(_hwnd);
@@ -785,28 +817,41 @@ public partial class MainWindow : Window
         await InitWebViewAsync();
         _bridge.ApplyFrameThemeFromSettings();
 
-        // Desktop (locked) mode is the launch default. Window mode is a manual in-session
-        // tool for move/resize; it is never restored as the boot mode.
+        // Restore last-quit mode (first install defaults to window via settings seed).
         _ = Dispatcher.BeginInvoke(async () =>
         {
             await Task.Delay(400);
+            var launchMode = ReadPersistedLaunchMode();
             try
             {
-                // If the React login wall already opened and claimed suspend, stay
-                // unlocked until the dialog closes (shouldCloakApp / preferDesktop).
-                await _surfaces.EnterDesktopModeAsync(
-                    _embed.LockedBounds ?? CapturePhysicalBounds(),
-                    shouldCloakApp: () => !_bridge.IsEmbedSuspended);
+                if (launchMode == "desktop")
+                {
+                    // If the React login wall already opened and claimed suspend, stay
+                    // unlocked until the dialog closes (shouldCloakApp / preferDesktop).
+                    await _surfaces.EnterDesktopModeAsync(
+                        _embed.LockedBounds ?? CapturePhysicalBounds(),
+                        shouldCloakApp: () => !_bridge.IsEmbedSuspended);
+                }
+                else
+                {
+                    _surfaces.EnterWindowMode(bringToFront: true);
+                }
+
                 _bridge.NotifyWidgetStatus();
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"바탕화면 모드 전환 실패: {ex.Message}", AppConstants.AppTitle);
+                if (launchMode == "desktop")
+                {
+                    MessageBox.Show($"바탕화면 모드 전환 실패: {ex.Message}", AppConstants.AppTitle);
+                }
+
                 try
                 {
                     // Lock failed at boot — fall back to a real window instead of
                     // leaving the HWND cloaked (invisible) forever.
-                    _surfaces.EnterWindowMode();
+                    _surfaces.EnterWindowMode(bringToFront: true);
+                    _bridge.NotifyWidgetStatus();
                 }
                 catch
                 {
@@ -1048,6 +1093,14 @@ public partial class MainWindow : Window
     {
         if (!e.IsSuccess)
         {
+            // Reload / Navigate replacement cancels the in-flight document and reports
+            // IsSuccess=false. That is expected — do not scare the user with a dialog.
+            if (e.WebErrorStatus is CoreWebView2WebErrorStatus.OperationCanceled
+                or CoreWebView2WebErrorStatus.ConnectionAborted)
+            {
+                return;
+            }
+
             BootSplash.Visibility = Visibility.Collapsed;
             MessageBox.Show(
                 this,
@@ -1228,8 +1281,20 @@ public partial class MainWindow : Window
 
             try
             {
-                Activate();
                 var hwnd = new WindowInteropHelper(this).Handle;
+                // Window mode: restore from minimized to the pre-minimize state (normal or
+                // maximized) before raising — Activate() alone leaves an iconic HWND down.
+                if (hwnd != IntPtr.Zero && (Win32.IsIconic(hwnd) || WindowState == WindowState.Minimized))
+                {
+                    Win32.ShowWindow(hwnd, Win32.SW_RESTORE);
+                }
+
+                if (!IsVisible)
+                {
+                    Show();
+                }
+
+                Activate();
                 if (hwnd != IntPtr.Zero)
                 {
                     Win32.SetForegroundWindow(hwnd);

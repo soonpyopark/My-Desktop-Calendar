@@ -2474,8 +2474,9 @@ internal sealed class CalendarStoreService
             },
             ["widget"] = new JsonObject
             {
-                ["launchMode"] = "desktop",
-                ["enabled"] = true,
+                // First install opens in window mode; later launches restore last quit mode.
+                ["launchMode"] = "window",
+                ["enabled"] = false,
                 ["alwaysOnTop"] = false,
                 ["chromeTopInset"] = 0,
                 ["chromeLeftInset"] = 0,

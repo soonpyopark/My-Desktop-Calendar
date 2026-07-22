@@ -425,6 +425,8 @@ internal sealed class DesktopEmbedService
 
     /// <summary>
     /// Desktop mode: undo Win+D / minimize-all / cloak so the calendar stays on the desktop.
+    /// Only touches DWM/ShowWindow when the surface is actually hidden — calling
+    /// DwmSetWindowAttribute every tick caused cursor stutter over the calendar.
     /// </summary>
     public void EnsureVisibleOnDesktop()
     {
@@ -433,9 +435,12 @@ internal sealed class DesktopEmbedService
             return;
         }
 
-        // Force-uncloak — shell show-desktop can leave DWM cloak set.
-        var cloakOff = 0;
-        _ = Win32.DwmSetWindowAttribute(_hwnd, Win32.DWMWA_CLOAK, ref cloakOff, sizeof(int));
+        var cloaked = IsDwmCloaked(_hwnd);
+        if (cloaked)
+        {
+            var cloakOff = 0;
+            _ = Win32.DwmSetWindowAttribute(_hwnd, Win32.DWMWA_CLOAK, ref cloakOff, sizeof(int));
+        }
 
         try
         {
@@ -462,7 +467,7 @@ internal sealed class DesktopEmbedService
             /* ignore */
         }
 
-        if (!Win32.IsWindowVisible(_hwnd) || Win32.IsIconic(_hwnd) || IsDwmCloaked(_hwnd))
+        if (!Win32.IsWindowVisible(_hwnd) || Win32.IsIconic(_hwnd) || cloaked)
         {
             Win32.ShowWindow(_hwnd, Win32.SW_SHOWNOACTIVATE);
             Win32.ShowWindow(_hwnd, Win32.SW_RESTORE);

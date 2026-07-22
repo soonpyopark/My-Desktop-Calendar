@@ -4,16 +4,37 @@ import { getEventLinks } from '../../shared/eventLinks.js';
 import { resolveEventTags } from '../../shared/eventTags.js';
 import { toDateKey } from './calendarUtils.js';
 
+const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
 /**
+ * Default search window: today − 1 year … today + 1 year.
  * @param {Date} [now]
  * @returns {{ start: string, end: string }}
  */
 export function getDefaultSearchRange(now = new Date()) {
-  const year = now.getFullYear();
+  const start = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate());
+  const end = new Date(now.getFullYear() + 1, now.getMonth(), now.getDate());
   return {
-    start: `${year - 1}-01-01`,
-    end: `${year + 1}-12-31`,
+    start: toDateKey(start),
+    end: toDateKey(end),
   };
+}
+
+/**
+ * @param {string | undefined} start
+ * @param {string | undefined} end
+ * @returns {{ start: string, end: string }}
+ */
+export function normalizeSearchRange(start, end) {
+  const defaults = getDefaultSearchRange();
+  let from = DATE_KEY_RE.test(String(start ?? '')) ? String(start) : defaults.start;
+  let to = DATE_KEY_RE.test(String(end ?? '')) ? String(end) : defaults.end;
+  if (from > to) {
+    const swap = from;
+    from = to;
+    to = swap;
+  }
+  return { start: from, end: to };
 }
 
 /**
@@ -66,6 +87,7 @@ function matchesQuery(query, event, calendar, tags) {
 /**
  * Search visible calendar events (expanded occurrences) by
  * title/description/location/calendar/tag name/link/attachment name.
+ * Returns the full match list — callers page/slice as needed.
  *
  * @param {{
  *   query: string,
@@ -74,8 +96,8 @@ function matchesQuery(query, event, calendar, tags) {
  *   tags?: object[],
  *   rangeStart?: string,
  *   rangeEnd?: string,
- *   limit?: number,
  * }} options
+ * @returns {object[]}
  */
 export function searchCalendarEvents({
   query,
@@ -84,22 +106,42 @@ export function searchCalendarEvents({
   tags = [],
   rangeStart,
   rangeEnd,
-  limit = 50,
 }) {
   const normalized = String(query ?? '').trim().toLowerCase();
   if (!normalized) return [];
 
-  const range = rangeStart && rangeEnd
-    ? { start: rangeStart, end: rangeEnd }
-    : getDefaultSearchRange();
-
+  const range = normalizeSearchRange(rangeStart, rangeEnd);
   const calendarById = new Map((calendars ?? []).map((calendar) => [calendar.id, calendar]));
   const expanded = expandEventsForRange(events ?? [], range.start, range.end);
 
   return expanded
     .filter((event) => matchesQuery(normalized, event, calendarById.get(event.calendarId), tags))
-    .sort(compareEventsForDisplay)
-    .slice(0, limit);
+    .sort(compareEventsForDisplay);
+}
+
+/**
+ * Build page number tokens for a compact pager: numbers and `'ellipsis'`.
+ * @param {number} page 1-based
+ * @param {number} totalPages
+ * @returns {Array<number | 'ellipsis'>}
+ */
+export function buildSearchPageItems(page, totalPages) {
+  const total = Math.max(1, Number(totalPages) || 1);
+  const current = Math.min(Math.max(1, Number(page) || 1), total);
+  if (total <= 7) {
+    return Array.from({ length: total }, (_, i) => i + 1);
+  }
+
+  /** @type {Array<number | 'ellipsis'>} */
+  const items = [1];
+  const start = Math.max(2, current - 1);
+  const end = Math.min(total - 1, current + 1);
+
+  if (start > 2) items.push('ellipsis');
+  for (let n = start; n <= end; n += 1) items.push(n);
+  if (end < total - 1) items.push('ellipsis');
+  items.push(total);
+  return items;
 }
 
 /**
@@ -123,3 +165,5 @@ export function dateFromDateKey(dateKey) {
 }
 
 export { toDateKey };
+
+export const SEARCH_PAGE_SIZE_OPTIONS = [10, 20, 50, 100];

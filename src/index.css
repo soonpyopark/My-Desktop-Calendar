@@ -756,7 +756,11 @@
 
   .day-quick-edit-check,
   .event-popover-check {
-    @apply h-3.5 w-3.5 shrink-0 accent-[var(--gcal-blue,#1a73e8)];
+    @apply h-3.5 w-3.5 shrink-0 cursor-pointer accent-[var(--gcal-blue,#1a73e8)];
+  }
+
+  .day-quick-edit-row.is-draggable .day-quick-edit-check {
+    cursor: pointer;
   }
 
   .event-popover-check:disabled {
@@ -1774,6 +1778,15 @@
   input[type='password']::-ms-reveal,
   input[type='password']::-ms-clear {
     display: none;
+  }
+
+  /* Hide Chromium/WebKit native search clear (X) — custom clear buttons already exist. */
+  input[type='search']::-webkit-search-cancel-button,
+  input[type='search']::-webkit-search-decoration,
+  input[type='search']::-ms-clear {
+    display: none;
+    -webkit-appearance: none;
+    appearance: none;
   }
 
   /*

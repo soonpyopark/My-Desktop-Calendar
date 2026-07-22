@@ -63,6 +63,22 @@ export default function App() {
   const [activeEvent, setActiveEvent] = useState(null);
   const [activeEventDay, setActiveEventDay] = useState(null);
   const [popoverAnchor, setPopoverAnchor] = useState(null);
+  /** Search-opened detail may stay up even while grid hide toggles are on. */
+  const detailFromSearchRef = useRef(false);
+
+  const clearEventDetail = useCallback(() => {
+    detailFromSearchRef.current = false;
+    setActiveEvent(null);
+    setActiveEventDay(null);
+    setPopoverAnchor(null);
+  }, []);
+
+  const openEventDetail = useCallback((event, dayKey, anchorRect = null, { fromSearch = false } = {}) => {
+    detailFromSearchRef.current = Boolean(fromSearch);
+    setActiveEvent(event);
+    setActiveEventDay(dayKey);
+    setPopoverAnchor(anchorRect);
+  }, []);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorEvent, setEditorEvent] = useState(null);
   const [quickEdit, setQuickEdit] = useState(null);
@@ -381,7 +397,17 @@ export default function App() {
   }, [requestMonthAlign, viewMode]);
 
   const shiftMonth = useCallback((delta) => {
-    setViewDate((prev) => new Date(prev.getFullYear(), prev.getMonth() + delta, 1));
+    setViewDate((prev) => {
+      const next = new Date(prev.getFullYear(), prev.getMonth() + delta, 1);
+      // Keep selection in the navigated month so scroll-align / reportVisibleMonth
+      // cannot yank the header back to a stale selectedDate in another period.
+      setSelectedDate((sel) => {
+        const lastDay = new Date(next.getFullYear(), next.getMonth() + 1, 0).getDate();
+        const day = Math.min(sel.getDate(), lastDay);
+        return new Date(next.getFullYear(), next.getMonth(), day);
+      });
+      return next;
+    });
     requestMonthAlign('month');
   }, [requestMonthAlign]);
 
@@ -395,7 +421,15 @@ export default function App() {
   }, [requestMonthAlign]);
 
   const shiftYear = useCallback((delta) => {
-    setViewDate((prev) => new Date(prev.getFullYear() + delta, prev.getMonth(), 1));
+    setViewDate((prev) => {
+      const next = new Date(prev.getFullYear() + delta, prev.getMonth(), 1);
+      setSelectedDate((sel) => {
+        const lastDay = new Date(next.getFullYear(), next.getMonth() + 1, 0).getDate();
+        const day = Math.min(sel.getDate(), lastDay);
+        return new Date(next.getFullYear(), next.getMonth(), day);
+      });
+      return next;
+    });
     requestMonthAlign('month');
   }, [requestMonthAlign]);
 
@@ -407,21 +441,15 @@ export default function App() {
       return;
     }
     if (mode === 'week') {
-      // Anchor the week on the day the user was actually looking at: the selected day
-      // when it belongs to the currently displayed month, otherwise the displayed
-      // month itself (e.g. after browsing months with prev/next without picking a day).
-      // Forcing an unconditional "today" align here used to silently discard whatever
-      // month was on screen — switching back to month mode then landed on today's
-      // month instead of the one the user had been viewing.
-      const anchor = selectedDate.getFullYear() === viewDate.getFullYear()
-        && selectedDate.getMonth() === viewDate.getMonth()
-        ? selectedDate
-        : viewDate;
+      // Month → week: open today's week. Align target must be 'today' — 'month'
+      // scrolls to day-1 of displayMonth and overrides the today anchor.
+      const today = new Date();
+      const anchor = new Date(today.getFullYear(), today.getMonth(), today.getDate());
       setViewDate(anchor);
       setSelectedDate(anchor);
-      requestMonthAlign('month');
+      requestMonthAlign('today');
     }
-  }, [requestMonthAlign, selectedDate, viewDate]);
+  }, [requestMonthAlign]);
 
   const openMonthView = useCallback((date) => {
     setViewDate(new Date(date.getFullYear(), date.getMonth(), 1));
@@ -506,9 +534,7 @@ export default function App() {
       void window.myCalendar?.bringWindowToFront?.();
     }
     setSelectedDate(date);
-    setActiveEvent(null);
-    setActiveEventDay(null);
-    setPopoverAnchor(null);
+    clearEventDetail();
     setEditorOpen(false);
     setEditorEvent(null);
     setQuickEdit({
@@ -518,7 +544,7 @@ export default function App() {
       anchorRect: snapshotAnchorRect(anchorRect) ?? resolveDayQuickEditRect(date),
       focusEvent,
     });
-  }, [isLoggedIn, resolveDayQuickEditRect, snapshotAnchorRect]);
+  }, [clearEventDetail, isLoggedIn, resolveDayQuickEditRect, snapshotAnchorRect]);
 
   const stashQuickEditReturn = useCallback((fallbackDate, focusEvent = null) => {
     const current = quickEditRef.current;
@@ -622,10 +648,9 @@ export default function App() {
     setSearchOpen(false);
     void resumeDesktopEmbedIfNeeded();
     openMonthView(date);
-    setActiveEvent(event);
-    setActiveEventDay(dayKey);
-    setPopoverAnchor(null);
-  }, [openMonthView, resumeDesktopEmbedIfNeeded]);
+    // Keep detail even when "숨기기" toggles would otherwise dismiss it.
+    openEventDetail(event, dayKey, null, { fromSearch: true });
+  }, [openEventDetail, openMonthView, resumeDesktopEmbedIfNeeded]);
 
   const closeEditor = useCallback(() => {
     const fromQuickEdit = editorOpenedFromQuickEditRef.current;
@@ -730,10 +755,9 @@ export default function App() {
     editorOpenedFromQuickEditRef.current = Boolean(fromQuickEdit);
     setQuickEdit(null);
     setEditorOpen(true);
-    setActiveEvent(null);
-    setActiveEventDay(null);
-    setPopoverAnchor(null);
+    clearEventDetail();
   }, [
+    clearEventDetail,
     findMasterEvent,
     isLoggedIn,
     restoreQuickEditFromReturn,
@@ -1317,17 +1341,16 @@ export default function App() {
 
   useEffect(() => {
     if (!eventsHidden) return;
-    setActiveEvent(null);
-    setActiveEventDay(null);
-    setPopoverAnchor(null);
-  }, [eventsHidden]);
+    // Search is a find/inspect path — don't dismiss a result the user just opened.
+    if (detailFromSearchRef.current) return;
+    clearEventDetail();
+  }, [eventsHidden, clearEventDetail]);
 
   useEffect(() => {
     if (!completedHidden || !activeEvent?.completed) return;
-    setActiveEvent(null);
-    setActiveEventDay(null);
-    setPopoverAnchor(null);
-  }, [completedHidden, activeEvent?.completed]);
+    if (detailFromSearchRef.current) return;
+    clearEventDetail();
+  }, [completedHidden, activeEvent?.completed, clearEventDetail]);
   const colorScheme = store?.settings?.viewOptions
     ? getColorScheme(store.settings.viewOptions)
     : (readStoredColorScheme() ?? 'system');
@@ -1575,23 +1598,17 @@ export default function App() {
               // Schedule-bar / 더보기-list hover → read-only detail (in-place).
               if (!isEventVisibleToViewer(event, calendars, false)) return;
               if (quickEdit || editorOpen) return;
-              setActiveEvent(event);
-              setActiveEventDay(dayKey);
-              setPopoverAnchor(anchorRect ?? { x: clientX, y: clientY });
+              openEventDetail(event, dayKey, anchorRect ?? { x: clientX, y: clientY });
             }}
             onEventDetail={(event, clientX, clientY, dayKey, anchorRect) => {
               // Right-click / list click → read-only detail (in-place).
               if (!isEventVisibleToViewer(event, calendars, false)) return;
               if (quickEdit || editorOpen) return;
-              setActiveEvent(event);
-              setActiveEventDay(dayKey);
-              setPopoverAnchor(anchorRect ?? { x: clientX, y: clientY });
+              openEventDetail(event, dayKey, anchorRect ?? { x: clientX, y: clientY });
             }}
             onCloseEventDetail={() => {
               // "더보기" hover takes over — close bar detail so the day list can open cleanly.
-              setActiveEvent(null);
-              setActiveEventDay(null);
-              setPopoverAnchor(null);
+              clearEventDetail();
             }}
             onEventEdit={(event, dayKey) => {
               // Bar / list-row double-click → full EventEditor.
@@ -1782,11 +1799,7 @@ export default function App() {
         dayKey={activeEventDay}
         anchorRect={popoverAnchor}
         canEdit={isLoggedIn && popoverEvent?.calendarId !== HOLIDAYS_KR_CALENDAR_ID}
-        onClose={() => {
-          setActiveEvent(null);
-          setActiveEventDay(null);
-          setPopoverAnchor(null);
-        }}
+        onClose={clearEventDetail}
         onEdit={(event) => {
           // Detail pencil → full EventEditor (not quick-edit). Closes detail + day list.
           openEditEvent(event, activeEventDay, { fromQuickEdit: false });

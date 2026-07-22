@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { CALENDAR_COLOR_PALETTE } from '../../shared/calendarColorPalette.js';
 import { getCalendarTheme } from '../lib/colors.js';
 import { cn } from '../lib/cn.js';
@@ -52,7 +53,7 @@ function CalendarColorSwatch({
  *   className?: string;
  * }} props
  */
-export default function CalendarColorPalette({ value, onChange, onRequestClose, className }) {
+function CalendarColorPalette({ value, onChange, onRequestClose, className }) {
   const selected = (value ?? '').toLowerCase();
   const isCustomSelected = Boolean(
     value && !CALENDAR_COLOR_PALETTE.some((c) => c.toLowerCase() === selected),
@@ -97,3 +98,7 @@ export default function CalendarColorPalette({ value, onChange, onRequestClose, 
     </div>
   );
 }
+
+// Name-draft typing in TagsPanel / CreateCalendarForm used to re-render all swatches
+// (theme calc + CustomColorPicker) on every keystroke; skip when color props are unchanged.
+export default memo(CalendarColorPalette);

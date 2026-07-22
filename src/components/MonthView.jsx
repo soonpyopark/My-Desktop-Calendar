@@ -30,10 +30,10 @@ import { isDesktopSurfaceHost, isNeutralinoDesktopShell } from '../lib/isNeutral
 import { getEventLinks } from '../../shared/eventLinks.js';
 import { getSeriesId } from '../../shared/eventOccurrences.js';
 
-// ~5 months each side. Keep all rows mounted (no shell↔row remount) — remount churn
-// was climbing WebView2 past 1GB. Far header jumps recenter only when month is missing.
-const WEEKS_BEFORE = 22;
-const WEEKS_AFTER = 22;
+// ~13 months each side so a single «이전/다음 연도» click stays inside the buffer.
+// Farther jumps (2+ years) recenter in the same render as viewDate (see weekRangeAnchor).
+const WEEKS_BEFORE = 56;
+const WEEKS_AFTER = 56;
 
 /** True when the 1st of (year, monthIndex) falls inside the scroll week buffer. */
 function isMonthInWeekBuffer(anchor, weekStartsOn, weeksBefore, weeksAfter, year, monthIndex) {
@@ -506,26 +506,30 @@ export default function MonthView({
     }
   }, [isFullMonthView, weeksInViewport]);
 
-  // Recenter ONLY when the displayed month is completely outside the buffer.
-  // Do not recenter on scroll "near edge" — that remount loop leaked multi-GB RAM.
-  useLayoutEffect(() => {
+  // Resolve the week-range anchor in render (not a later layout effect). Year jumps used
+  // to bump scrollAnchorVersion asynchronously: align ran against the *old* weeks, failed
+  // to find day-1, stamped prevViewMonthRef anyway, then after remount skipped realign —
+  // scrollTop stayed wrong and reportVisibleMonth overwrote the header (e.g. → 2027년 3월).
+  const weekRangeAnchor = useMemo(() => {
+    const current = scrollAnchorRef.current;
     if (isMonthInWeekBuffer(
-      scrollAnchorRef.current,
+      current,
       weekStartsOn,
       WEEKS_BEFORE,
       WEEKS_AFTER,
       displayYear,
       displayMonth,
     )) {
-      return;
+      return current;
     }
-    scrollAnchorRef.current = new Date(displayYear, displayMonth, 1);
-    setScrollAnchorVersion((version) => version + 1);
-  }, [displayYear, displayMonth, weekStartsOn]);
+    const next = new Date(displayYear, displayMonth, 1);
+    scrollAnchorRef.current = next;
+    return next;
+  }, [displayYear, displayMonth, weekStartsOn, scrollAnchorVersion]);
 
   const weeks = useMemo(
-    () => generateWeekRange(scrollAnchorRef.current, weekStartsOn, WEEKS_BEFORE, WEEKS_AFTER),
-    [weekStartsOn, scrollAnchorVersion],
+    () => generateWeekRange(weekRangeAnchor, weekStartsOn, WEEKS_BEFORE, WEEKS_AFTER),
+    [weekRangeAnchor, weekStartsOn],
   );
 
   const eventCapacity = useMaxVisibleEvents(scrollRef, effectiveWeeksInViewport);
@@ -641,8 +645,14 @@ export default function MonthView({
       return;
     }
 
-    const anchor = selectedDate ?? viewDate;
-    scrollToDateInViewportRef.current(anchor, 0, behavior);
+    // Chrome prev/next/year updates viewDate to day-1 of the target period. Aligning to
+    // selectedDate here used to yank scroll (and reportVisibleMonth) back to whatever
+    // day was last clicked — often a different month/year after rapid year navigation.
+    scrollToDateInViewportRef.current(
+      new Date(displayYear, displayMonth, 1),
+      0,
+      behavior,
+    );
   };
 
   useLayoutEffect(() => {
@@ -695,7 +705,6 @@ export default function MonthView({
     scrollAnchorVersion,
     weekStartsOn,
     weeksInViewport,
-    selectedDate,
     viewDate,
   ]);
 

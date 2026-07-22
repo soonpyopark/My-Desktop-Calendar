@@ -335,6 +335,15 @@ function formatHolidaySyncTime(iso) {
   }
 }
 
+/** Map internal bridge/timeout errors to a user-facing holiday sync message. */
+function friendlyHolidaySyncError(message) {
+  const text = String(message ?? '').trim();
+  if (!text || /native bridge timeout|native host unavailable|timeout/i.test(text)) {
+    return '동기화에 실패하였습니다. 잠시 후 다시 시도해 보세요.';
+  }
+  return text;
+}
+
 function HolidaysSyncPanel({ settings, onSyncHolidays, onSaveSettings }) {
   const { alert } = useAppDialog();
   const [syncing, setSyncing] = useState(false);
@@ -394,13 +403,14 @@ function HolidaysSyncPanel({ settings, onSyncHolidays, onSaveSettings }) {
         return;
       }
       if (!result?.ok) {
+        const raw = String(result?.message ?? result?.error ?? '');
         const offline = result?.reason === 'offline'
-          || /인터넷 연결이 필요합니다|fetch failed|network|offline/i.test(String(result?.message ?? result?.error ?? ''));
+          || /인터넷 연결이 필요합니다|fetch failed|network|offline/i.test(raw);
         if (offline) {
           await showOfflineNotice('공휴일 동기화는 인터넷 연결이 필요합니다.');
           return;
         }
-        await alert(result?.message || result?.error || '공휴일 동기화에 실패했습니다.');
+        await alert(friendlyHolidaySyncError(raw) || '동기화에 실패하였습니다. 잠시 후 다시 시도해 보세요.');
         return;
       }
       await alert(result.message || '공휴일을 동기화했습니다.');
@@ -411,7 +421,7 @@ function HolidaysSyncPanel({ settings, onSyncHolidays, onSaveSettings }) {
         await showOfflineNotice('공휴일 동기화는 인터넷 연결이 필요합니다.');
         return;
       }
-      await alert(message || '공휴일 동기화에 실패했습니다.');
+      await alert(friendlyHolidaySyncError(message) || '동기화에 실패하였습니다. 잠시 후 다시 시도해 보세요.');
     } finally {
       setSyncing(false);
     }
@@ -525,10 +535,69 @@ function toColorInputValue(color, fallback = '#9aa0a6') {
   return fallback;
 }
 
-function TagsPanel({ tags, onCreateTag, onUpdateTag, onDeleteTag }) {
-  const { alert, confirm } = useAppDialog();
+/**
+ * Isolated create form so typing the name only re-renders this subtree —
+ * not the whole tag list (drag handlers / edit rows) under TagsPanel.
+ */
+function NewTagForm({ tagsCount, busy, onCreate }) {
+  const { alert } = useAppDialog();
   const [nameDraft, setNameDraft] = useState('');
   const [colorDraft, setColorDraft] = useState(() => getDefaultCalendarColor(0));
+
+  const handleCreate = async () => {
+    const name = nameDraft.trim();
+    if (!name) {
+      await alert('태그 이름을 입력해 주세요.');
+      return;
+    }
+    try {
+      await onCreate({ name, color: colorDraft });
+      setNameDraft('');
+      setColorDraft(getDefaultCalendarColor(tagsCount + 1));
+    } catch (err) {
+      await alert(err instanceof Error ? err.message : '태그를 추가하지 못했습니다.');
+    }
+  };
+
+  return (
+    <div className="mb-6 space-y-4 rounded-xl border border-gcal-border-light bg-gcal-surface p-4">
+      <div>
+        <FieldLabel>태그 색상</FieldLabel>
+        <CalendarColorPalette value={colorDraft} onChange={setColorDraft} />
+      </div>
+      <div>
+        <FieldLabel>새 태그</FieldLabel>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <input
+            type="text"
+            className={cn(fieldBoxClass, 'min-w-[10rem] flex-1')}
+            value={nameDraft}
+            onChange={(e) => setNameDraft(e.target.value)}
+            placeholder="예: 행정"
+            maxLength={32}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                void handleCreate();
+              }
+            }}
+          />
+          <button
+            type="button"
+            className="inline-flex h-11 items-center rounded-lg bg-gcal-blue px-4 text-sm font-medium text-white hover:opacity-90 disabled:opacity-40"
+            disabled={busy || !nameDraft.trim()}
+            onClick={() => void handleCreate()}
+          >
+            추가
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TagsPanel({ tags, onCreateTag, onUpdateTag, onDeleteTag }) {
+  const { alert, confirm } = useAppDialog();
   const [editingId, setEditingId] = useState(null);
   const [editName, setEditName] = useState('');
   const [editColor, setEditColor] = useState(() => getDefaultCalendarColor(0));
@@ -559,23 +628,14 @@ function TagsPanel({ tags, onCreateTag, onUpdateTag, onDeleteTag }) {
     if (live === orderIds.join('\0')) setOrderIds(null);
   }, [tags, orderIds]);
 
-  const handleCreate = async () => {
-    const name = nameDraft.trim();
-    if (!name) {
-      await alert('태그 이름을 입력해 주세요.');
-      return;
-    }
+  const handleCreate = useCallback(async (payload) => {
     setBusy(true);
     try {
-      await onCreateTag({ name, color: colorDraft });
-      setNameDraft('');
-      setColorDraft(getDefaultCalendarColor((tags?.length ?? 0) + 1));
-    } catch (err) {
-      await alert(err instanceof Error ? err.message : '태그를 추가하지 못했습니다.');
+      await onCreateTag(payload);
     } finally {
       setBusy(false);
     }
-  };
+  }, [onCreateTag]);
 
   const handleSaveEdit = async (tag) => {
     const name = editName.trim();
@@ -646,39 +706,11 @@ function TagsPanel({ tags, onCreateTag, onUpdateTag, onDeleteTag }) {
         일정에 붙일 태그를 등록합니다. 왼쪽 핸들을 끌어 순서를 바꿀 수 있습니다.
       </p>
 
-      <div className="mb-6 space-y-4 rounded-xl border border-gcal-border-light bg-gcal-surface p-4">
-        <div>
-          <FieldLabel>태그 색상</FieldLabel>
-          <CalendarColorPalette value={colorDraft} onChange={setColorDraft} />
-        </div>
-        <div>
-          <FieldLabel>새 태그</FieldLabel>
-          <div className="mt-1 flex flex-wrap items-center gap-2">
-            <input
-              type="text"
-              className={cn(fieldBoxClass, 'min-w-[10rem] flex-1')}
-              value={nameDraft}
-              onChange={(e) => setNameDraft(e.target.value)}
-              placeholder="예: 행정"
-              maxLength={32}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  void handleCreate();
-                }
-              }}
-            />
-            <button
-              type="button"
-              className="inline-flex h-11 items-center rounded-lg bg-gcal-blue px-4 text-sm font-medium text-white hover:opacity-90 disabled:opacity-40"
-              disabled={busy || !nameDraft.trim()}
-              onClick={() => void handleCreate()}
-            >
-              추가
-            </button>
-          </div>
-        </div>
-      </div>
+      <NewTagForm
+        tagsCount={tags?.length ?? 0}
+        busy={busy}
+        onCreate={handleCreate}
+      />
 
       <ul className="m-0 list-none space-y-2 p-0">
         {sorted.length === 0 && (

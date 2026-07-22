@@ -1,6 +1,6 @@
 {
   "name": "my-desktop-calendar",
-  "version": "1.1.8",
+  "version": "1.1.9",
   "description": "My Desktop Calendar — Windows native (WPF) desktop calendar",
   "type": "module",
   "scripts": {

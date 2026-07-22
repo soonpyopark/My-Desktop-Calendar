@@ -17,7 +17,7 @@ internal static class AppConstants
     public const int FactoryDefaultOffsetY = 15;
 
     public const string AppName = "My Desktop Calendar";
-    public const string AppVersion = "1.1.8";
+    public const string AppVersion = "1.1.9";
     public const string AppTitle = $"{AppName} v{AppVersion}";
     public const string SiteUrl = "https://note4all.tistory.com";
     public const string DefaultDataDir = "data";
